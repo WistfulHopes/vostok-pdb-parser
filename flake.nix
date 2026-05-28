@@ -1,5 +1,5 @@
 {
-  description = "pdb-parser dev environment";
+  description = "vostok-pdb-parser dev environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
