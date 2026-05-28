@@ -10,6 +10,7 @@ pdb = { package = "pdb2", git = "https://github.com/afranchuk/pdb", rev = "384c1
 pdb-addr2line = { git = "https://github.com/srp-survarium/pdb-addr2line", rev = "43e07e59bccf72ef5a128a1f0995258b93a4c3fc" }
 pdb-addr2line-orig = { package = "pdb-addr2line", version = "0.11.2" }
 
+anyhow = "1.0"
 bitflags = "2.9.2"
 chrono = "0.4.42"
 uuid = { version = "1.18.1", features = ["v4"] }
