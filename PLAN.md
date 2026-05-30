@@ -116,13 +116,16 @@ FunctionEntry {
 - `rich_render.rs` — `render_listing` (offset-prefixed asm, `; <0xSIZE> ; <src>`
   on each statement's first instruction) and `render_structure` (statement
   skeleton only).
-- `rich_diff.rs` — `diff` (LCS over instruction text → Equal/Delete/Insert +
-  match ratio) and `render_unified`.
+- `rich_diff.rs` — built-in LCS diff over instruction text → Equal/Delete/Insert
+  + match ratio; `render_unified`.
+- `rich_objdiff.rs` — operand-aware diff via `objdiff-core` over the delinker
+  `.obj`s; returns `match_percent` + an aligned listing.
 - `rich_query.rs` — `search(index, {name substr, rva})`.
 - `bin/pdb_rich_context.rs` — build CLI (`--mode base|target`, `--out`).
 - `bin/pdb_rich_query.rs` — discovery: `--list` / fetch one by name|rva.
 - `bin/pdb_fetch.rs` — `--target-index`/`--base-index`, select by `--function`/
-  `--rva`, `--view target,base,structure,diff`.
+  `--rva`, `--view target,base,structure,diff`; `--objdiff-{base,target}-dir`
+  switch the diff to the objdiff-core backend.
 
 ---
 
@@ -137,15 +140,14 @@ budget signal). Two backends:
    label renumbering, and a callee resolving to a different recovered name across
    the two PDBs both show as diffs though the code is equal.
 
-2. **objdiff-core** (planned, owner-requested) — operand/relocation-aware, kills
-   those false positives. Integration path (feasible, verified inputs exist):
-   - The delinker already emits `binaries/objdiff/{base,target}/<file>.obj` and
-     an `objdiff.json`. Our `FunctionEntry.file` maps directly to `<file>.obj`.
-   - Add `objdiff-core` (v2.5, feature `x86`); read the two `.obj`s; run
-     `diff::diff_objs`; pick the symbol for our function; emit its structured
-     instruction diff. Keep LCS as the no-objfile fallback.
-   - Open: join our demangled `name` to the COFF symbol (store the mangled
-     `proc.name` in the index, or map by RVA→symbol).
+2. **objdiff-core** (`rich_objdiff`) — **done**, operand/relocation-aware, kills
+   those false positives. Path: read `binaries/objdiff/{base,target}/<file>.obj`
+   (our `FunctionEntry.file` maps straight to them), `diff::diff_objs`, find our
+   symbol by its decorated name (`FunctionEntry.mangled`, taken from the PDB
+   **Public** symbol — the module symbol is undecorated and does not match the
+   COFF name), emit `match_percent` + the aligned instruction rows. LCS stays as
+   the no-objfile fallback. Verified: `contact_test(world*)` = 94.95%, with the
+   mismatches being register-allocation differences (the expected LTO artifacts).
 
 **Rendering:** structured op stream for the model; git-style unified view for
 humans. Batched matching will need many diffs against target in one pass.
@@ -181,7 +183,6 @@ carcass already extracts).
    (upstream header changes to the TU)?
 
 ## Deferred / roadmap
-- objdiff-core diff backend (next concrete step).
 - **Version history**: keep the last ~5 base index snapshots so the agent can
   fetch prior attempts and avoid repeating dead ends. (Owner: "would be cool …
   but maybe it doesn't need that.") Cheap to add once attempts are tracked; ties

@@ -47,6 +47,10 @@ use crate::rich_render;
 pub struct SymbolMaps {
     pub functions: BTreeMap<usize, String>,
     pub data: BTreeMap<usize, String>,
+    /// RVA -> decorated (mangled) name, from Public symbols only. Module
+    /// Procedure symbols carry only the undecorated `ns::func`; the COFF objects
+    /// (and thus objdiff) key on the decorated name, which lives here.
+    pub public_functions: BTreeMap<usize, String>,
 }
 
 /// One decoded instruction. `text` is the rendered mnemonic+operands with branch
@@ -87,6 +91,9 @@ pub struct Statement {
 pub struct FunctionEntry {
     /// Full demangled signature.
     pub name: String,
+    /// Decorated (mangled) COFF symbol name — the join key to the delinker `.obj`
+    /// files for the objdiff backend.
+    pub mangled: String,
     /// Function RVA (image-relative) — the merge key shared with the line program.
     pub rva: u32,
     /// Function length in bytes.
@@ -224,10 +231,17 @@ pub fn dump_rich_context(pdb_path: &Path, exe_path: &Path, opts: &Options) -> cr
                     .unwrap_or_else(|_| proc.name.to_string().into_owned());
 
                 let file = rel.unwrap_or(file_name).replace('\\', "/");
+                // Decorated name for the objdiff/.obj join; module symbols only
+                // give the undecorated form, so prefer the Public-symbol name.
+                let mangled = symbols
+                    .public_functions
+                    .get(&func_rva)
+                    .cloned()
+                    .unwrap_or_else(|| proc.name.to_string().into_owned());
 
                 entries.push(build_function(
-                    signature, &symbols, image_base, text_rva, &text_data, func_rva, size, &stmts,
-                    src_lines, file,
+                    signature, mangled, &symbols, image_base, text_rva, &text_data, func_rva, size,
+                    &stmts, src_lines, file,
                 ));
             }
         }
@@ -249,6 +263,7 @@ pub fn dump_rich_context(pdb_path: &Path, exe_path: &Path, opts: &Options) -> cr
 #[allow(clippy::too_many_arguments)]
 fn build_function(
     signature: String,
+    mangled: String,
     symbols: &Rc<SymbolMaps>,
     image_base: u64,
     text_rva: usize,
@@ -320,6 +335,7 @@ fn build_function(
 
     FunctionEntry {
         name: signature,
+        mangled,
         rva: func_rva as u32,
         size: size as u32,
         file,
@@ -336,6 +352,7 @@ fn build_symbol_maps(
 ) -> crate::Result<SymbolMaps> {
     let mut functions: BTreeMap<usize, String> = BTreeMap::new();
     let mut data: BTreeMap<usize, String> = BTreeMap::new();
+    let mut public_functions: BTreeMap<usize, String> = BTreeMap::new();
 
     {
         let dbi = pdb.debug_information()?;
@@ -380,9 +397,9 @@ fn build_symbol_maps(
             if let Some(rva) = p.offset.to_rva(address_map) {
                 let rva = rva.0 as usize;
                 if p.function {
-                    functions
-                        .entry(rva)
-                        .or_insert_with(|| p.name.to_string().into_owned());
+                    let name = p.name.to_string().into_owned();
+                    public_functions.entry(rva).or_insert_with(|| name.clone());
+                    functions.entry(rva).or_insert(name);
                 } else {
                     data.entry(rva)
                         .or_insert_with(|| p.name.to_string().into_owned());
@@ -391,7 +408,7 @@ fn build_symbol_maps(
         }
     }
 
-    Ok(SymbolMaps { functions, data })
+    Ok(SymbolMaps { functions, data, public_functions })
 }
 
 /// Group entries by file, each file's functions sorted by RVA — borrowed.

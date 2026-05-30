@@ -28,6 +28,7 @@ use clap::Parser;
 
 use vostok_pdb_parser::rich_context::FunctionEntry;
 use vostok_pdb_parser::rich_diff;
+use vostok_pdb_parser::rich_objdiff;
 use vostok_pdb_parser::rich_query::{search, Query};
 use vostok_pdb_parser::rich_render::{render_listing, render_structure};
 
@@ -53,6 +54,15 @@ struct Cli {
     /// which indexes are supplied (diff if both, else the available side).
     #[arg(long, value_delimiter = ',')]
     view: Vec<String>,
+
+    /// Delinker base `.obj` dir (e.g. binaries/objdiff/base). With its target
+    /// counterpart, `--view diff` uses the operand-aware objdiff-core backend.
+    #[arg(long, value_hint = clap::ValueHint::DirPath)]
+    objdiff_base_dir: Option<PathBuf>,
+
+    /// Delinker target `.obj` dir (e.g. binaries/objdiff/target).
+    #[arg(long, value_hint = clap::ValueHint::DirPath)]
+    objdiff_target_dir: Option<PathBuf>,
 }
 
 fn parse_hex(s: &str) -> Result<u32, std::num::ParseIntError> {
@@ -146,15 +156,37 @@ fn main() {
                 None => {}
             },
             "diff" => match (&base, &target) {
-                (Some(b), Some(t)) => {
-                    let d = rich_diff::diff(b, t);
-                    print!("{}", rich_diff::render_unified(b, t, &d));
-                }
+                (Some(b), Some(t)) => print_diff(&cli, b, t),
                 _ => eprintln!("(--view diff needs both --base-index and --target-index)"),
             },
             other => eprintln!("(unknown view '{other}'; use target|base|structure|diff)"),
         }
     }
+}
+
+/// Prefer the operand-aware objdiff-core backend when the delinker `.obj` dirs
+/// are given; otherwise (or on any miss) fall back to the built-in text diff.
+fn print_diff(cli: &Cli, base: &FunctionEntry, target: &FunctionEntry) {
+    if let (Some(bdir), Some(tdir)) = (&cli.objdiff_base_dir, &cli.objdiff_target_dir) {
+        let bobj = bdir.join(format!("{}.obj", base.file));
+        let tobj = tdir.join(format!("{}.obj", target.file));
+        match rich_objdiff::diff(&bobj, &tobj, &target.mangled) {
+            Ok(Some(result)) => {
+                print!("{}", result.listing);
+                return;
+            }
+            Ok(None) => eprintln!(
+                "(objdiff: '{}' not found in {} / {}; falling back to text diff)",
+                target.mangled,
+                bobj.display(),
+                tobj.display()
+            ),
+            Err(e) => eprintln!("(objdiff failed: {e}; falling back to text diff)"),
+        }
+    }
+
+    let d = rich_diff::diff(base, target);
+    print!("{}", rich_diff::render_unified(base, target, &d));
 }
 
 fn fail(msg: &str) -> ! {
