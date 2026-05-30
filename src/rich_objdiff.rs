@@ -6,8 +6,13 @@
 //! (`binaries/objdiff/{base,target}/<file>.obj`); our [`FunctionEntry::file`]
 //! maps straight to them and [`FunctionEntry::mangled`] is the COFF symbol name
 //! to look up. objdiff matches symbols across the two objects by name; we pull
-//! out the one we asked for and render its aligned instruction diff.
+//! out the one we asked for as a structured row stream ([`ObjdiffResult`]).
+//!
+//! [`render`] then interleaves our own source/offset metadata back onto those
+//! rows, walking the base [`FunctionEntry`] in lockstep — the diff is computed on
+//! raw asm (objdiff), the metadata is attached only for display.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
@@ -15,11 +20,35 @@ use objdiff_core::diff::{diff_objs, DiffObjConfig, ObjDiff, ObjInsDiff, ObjInsDi
 use objdiff_core::obj::read::read;
 use objdiff_core::obj::ObjInfo;
 
+use crate::rich_context::{FunctionEntry, Statement};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum RowKind {
+    /// Identical in both.
+    Equal,
+    /// Same slot, different instruction (op/arg/replace mismatch).
+    Replace,
+    /// Base only (must be removed to reach target).
+    Delete,
+    /// Target only (must be added to reach target).
+    Insert,
+}
+
+/// One aligned diff row. `base`/`target` hold the rendered instruction text for
+/// each side (whichever is present for the kind); `base_off` is the row's offset
+/// from the base function start (from objdiff's own addresses, so it survives the
+/// two disassemblers splitting instructions differently).
+pub struct ObjdiffRow {
+    pub kind: RowKind,
+    pub base: Option<String>,
+    pub target: Option<String>,
+    pub base_off: Option<u32>,
+}
+
 pub struct ObjdiffResult {
     /// Instruction-level match percent (0..100). The retry-budget signal.
     pub match_percent: f32,
-    /// Rendered aligned diff listing.
-    pub listing: String,
+    pub rows: Vec<ObjdiffRow>,
 }
 
 fn anyhow_to_err(e: anyhow::Error) -> crate::Error {
@@ -44,25 +73,91 @@ pub fn diff(base_obj: &Path, target_obj: &Path, mangled: &str) -> crate::Result<
     };
     let match_percent = bsym.match_percent.unwrap_or(0.0);
 
-    let mut listing = String::new();
-    let _ = writeln!(listing, "; objdiff match {match_percent:.2}%  {mangled}");
+    // The base function's first instruction address is the origin for offsets.
+    let origin = bsym
+        .instructions
+        .iter()
+        .find_map(|d| d.ins.as_ref().map(|i| i.address))
+        .unwrap_or(0);
 
-    // objdiff aligns the two instruction streams into equal-length rows when the
-    // symbols are paired; zip them for a unified view. If unpaired, show base.
-    match bsym.target_symbol.map(|r| target_diff.symbol_diff(r)) {
-        Some(tsym) if tsym.instructions.len() == bsym.instructions.len() => {
-            for (l, r) in bsym.instructions.iter().zip(tsym.instructions.iter()) {
-                render_row(&mut listing, l, r);
+    // objdiff aligns the two streams into equal-length rows when the symbols are
+    // paired; zip them. If unpaired/mismatched, fall back to the base side.
+    let rows = match bsym.target_symbol.map(|r| target_diff.symbol_diff(r)) {
+        Some(tsym) if tsym.instructions.len() == bsym.instructions.len() => bsym
+            .instructions
+            .iter()
+            .zip(tsym.instructions.iter())
+            .map(|(l, r)| make_row(l, r, origin))
+            .collect(),
+        _ => bsym.instructions.iter().map(|l| make_row(l, l, origin)).collect(),
+    };
+
+    Ok(Some(ObjdiffResult { match_percent, rows }))
+}
+
+fn make_row(l: &ObjInsDiff, r: &ObjInsDiff, origin: u64) -> ObjdiffRow {
+    let lt = || text(l).to_string();
+    let rt = || text(r).to_string();
+    let base_off = l.ins.as_ref().map(|i| (i.address - origin) as u32);
+    let (kind, base, target) = match l.kind {
+        ObjInsDiffKind::None => (RowKind::Equal, Some(lt()), Some(rt())),
+        ObjInsDiffKind::Delete => (RowKind::Delete, Some(lt()), None),
+        ObjInsDiffKind::Insert => (RowKind::Insert, None, Some(rt())),
+        ObjInsDiffKind::Replace | ObjInsDiffKind::OpMismatch | ObjInsDiffKind::ArgMismatch => {
+            (RowKind::Replace, Some(lt()), Some(rt()))
+        }
+    };
+    ObjdiffRow { kind, base, target, base_off }
+}
+
+/// Render the diff with our source/offset metadata interleaved. Source comes from
+/// the *base* `FunctionEntry` (the compiled side that has it): each base-side
+/// row's offset is `base_off`, and when that offset starts a source statement we
+/// emit the statement header first. Keyed by offset, so it is robust to objdiff
+/// and iced splitting instructions differently.
+pub fn render(result: &ObjdiffResult, base: &FunctionEntry) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{}:", base.name);
+    let _ = writeln!(out, "; objdiff match {:.2}%", result.match_percent);
+
+    let stmt_at: HashMap<u32, &Statement> = base.statements.iter().map(|s| (s.off, s)).collect();
+
+    for row in &result.rows {
+        if let Some(off) = row.base_off {
+            if let Some(stmt) = stmt_at.get(&off) {
+                match &stmt.source {
+                    Some(src) => {
+                        let _ = writeln!(out, "{src}\t; <0x{:x}>", stmt.size);
+                    }
+                    None => {
+                        let _ = writeln!(out, "[0x{off:x}]\t; <0x{:x}>", stmt.size);
+                    }
+                }
             }
         }
-        _ => {
-            for l in &bsym.instructions {
-                render_row(&mut listing, l, l);
-            }
+        render_row(&mut out, row, row.base_off);
+    }
+    out
+}
+
+fn render_row(out: &mut String, row: &ObjdiffRow, off: Option<u32>) {
+    let at = off.map(|o| format!("0x{o:02x}: ")).unwrap_or_default();
+    let base = row.base.as_deref().unwrap_or("");
+    let target = row.target.as_deref().unwrap_or("");
+    match row.kind {
+        RowKind::Equal => {
+            let _ = writeln!(out, "  {at}{base}");
+        }
+        RowKind::Replace => {
+            let _ = writeln!(out, "~ {at}{base:<28} -> {target}");
+        }
+        RowKind::Delete => {
+            let _ = writeln!(out, "- {at}{base}");
+        }
+        RowKind::Insert => {
+            let _ = writeln!(out, "+ {target}");
         }
     }
-
-    Ok(Some(ObjdiffResult { match_percent, listing }))
 }
 
 fn find_symbol<'a>(diff: &'a ObjDiff, obj: &ObjInfo, mangled: &str) -> Option<&'a ObjSymbolDiff> {
@@ -74,23 +169,4 @@ fn find_symbol<'a>(diff: &'a ObjDiff, obj: &ObjInfo, mangled: &str) -> Option<&'
 
 fn text(d: &ObjInsDiff) -> &str {
     d.ins.as_ref().map(|i| i.formatted.as_str()).unwrap_or("")
-}
-
-/// `l` = base row, `r` = the aligned target row. Markers: `  ` equal, `~`
-/// op/arg/replace mismatch (base -> target), `-` base-only, `+` target-only.
-fn render_row(out: &mut String, l: &ObjInsDiff, r: &ObjInsDiff) {
-    match l.kind {
-        ObjInsDiffKind::None => {
-            let _ = writeln!(out, "  {}", text(l));
-        }
-        ObjInsDiffKind::Delete => {
-            let _ = writeln!(out, "- {}", text(l));
-        }
-        ObjInsDiffKind::Insert => {
-            let _ = writeln!(out, "+ {}", text(r));
-        }
-        ObjInsDiffKind::Replace | ObjInsDiffKind::OpMismatch | ObjInsDiffKind::ArgMismatch => {
-            let _ = writeln!(out, "~ {:<30} -> {}", text(l), text(r));
-        }
-    }
 }

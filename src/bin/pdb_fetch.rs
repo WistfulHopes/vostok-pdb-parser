@@ -172,7 +172,7 @@ fn print_diff(cli: &Cli, base: &FunctionEntry, target: &FunctionEntry) {
         let tobj = tdir.join(format!("{}.obj", target.file));
         match rich_objdiff::diff(&bobj, &tobj, &target.mangled) {
             Ok(Some(result)) => {
-                print!("{}", result.listing);
+                print!("{}", rich_objdiff::render(&result, base));
                 return;
             }
             Ok(None) => eprintln!(
