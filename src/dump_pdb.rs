@@ -57,16 +57,16 @@ pub fn dump_pdb(
     files
         .folders
         .get_mut(p("headers"))
-        .unwrap()
+        .expect("no headers were generated from this PDB")
         .folders
         .get_mut(p("vostok"))
-        .unwrap()
+        .expect("no engine headers under headers/vostok were generated")
         .move_layer_up(p("__root"));
 
     files
         .folders
         .get_mut(p("sources"))
-        .unwrap()
+        .expect("no source stubs were generated")
         .move_layer_up(p("__root"));
 
     // generate_vs_solution(output_path, flags, &files)?;
