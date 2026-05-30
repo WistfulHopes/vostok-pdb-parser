@@ -7,6 +7,9 @@ pub mod dump_pdb;
 pub mod gen_headers;
 pub mod gen_sources;
 
+pub mod disasm;
+pub mod rich_context;
+
 pub mod formatter;
 pub mod helpers;
 pub mod pdb_parser;
