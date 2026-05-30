@@ -1,170 +1,140 @@
-# WORK LOG — `pdb_rich_context`
+# WORK LOG — rich context & fetch
 
-Running log of decisions **taken** and **not taken**, with rationale. Newest at
-the bottom of each section.
+Running log of decisions **taken** and **not taken**, with rationale. See
+`PLAN.md` for the design; this is the "why we chose X" history.
 
-## Context established
+## Context
 
-* Worktree `rich-context-binary` created off the repo (branch
-  `worktree-rich-context-binary`). Task: a new binary producing rich,
-  disassembly-interleaved-with-source context for binary matching.
-* Located inputs:
-  * target: `/nix/store/…-survarium-game/survarium.{exe,pdb}` (also copied in
-    `vcproj2ninja/`).
-  * base: `vostok/binaries/Win32/survarium-dx11-win32-gold.{exe,pdb}`.
-    (Note: the `.exe` there was 0 bytes at inspection time — a rebuild is needed
-    before base smoke-testing; the `.pdb` is present at 72 MB.)
-* Confirmed the two reusable halves:
-  * `vostok-pdb-parser/src/gen_sources.rs` already turns the PDB line program
-    into per-function `Statement{ rva, line_start, depth }` — the source half.
-  * `vostok-delinker/src/object_files.rs` already slices per-function `.text`
-    bytes and walks them with `iced-x86` — the disassembly half.
-  * Both key functions by the **same RVA** (`text.rva + proc.offset`), so
-    instruction→statement mapping is an exact sorted merge, not a heuristic.
+Worktree `rich-context-binary` (branch `worktree-rich-context-binary`). Goal: a
+structured, queryable context layer for AI binary matching — disassembly paired
+with source statements, served as views (target/base/structure/diff), built per
+side from the PDB+EXE.
+
+Inputs:
+- target: `vcproj2ninja/survarium.{exe,pdb}` (also in the nix store), engine
+  path `c:\survarium\sources`.
+- base: `vostok/binaries/Win32/survarium-dx11-win32-gold.{exe,pdb}`, engine path
+  `z:\home\sheep\projects\surv-decomp\vostok\sources\`, source root
+  `vostok/sources`. (The base `.exe` is rebuilt; an early note that it was 0
+  bytes is stale.)
+
+Two reusable halves underpin everything, keyed by the **same RVA** so the merge
+is exact, not heuristic:
+- `gen_sources.rs` → per-function statements `(rva, line)` from the line program.
+- `vostok-delinker/object_files.rs` → per-function `.text` bytes + iced-x86 walk.
 
 ## Decisions TAKEN
 
-1. **Host the new bin in `vostok-pdb-parser`, not `vostok-delinker`.**
-   Why: the *source* half (signatures via `PdbParser`/`formatter`, statement +
-   line extraction in `gen_sources`, the `Files`/`utils_fs` structure-tree
-   writer) all live here and are the richer, harder-to-move pieces. The delinker
-   half we actually need is a small, self-contained subset (decode loop + symbol
-   RVA maps + section info). Cheaper to bring that subset here than to move
-   pdb-parser's type machinery there.
+1. **Host in `vostok-pdb-parser`, copy the minimal delinker subset.** The richer
+   source/type machinery lives here; the delinker half we need (decode loop +
+   symbol RVA maps + section info) is small and was ported, not depended on.
+   The delinker stays a working binary crate; we read its `.obj` outputs as
+   files where needed (objdiff-core path).
 
-2. **Copy the minimal delinker subset rather than depend on the delinker crate.**
-   The delinker exposes only a `main` (binary crate, no `lib.rs`); its modules
-   are private. Rather than refactor it into a library now (risky, touches a
-   working tool), port just: PE/PDB open + `Env`/`SecInfo` (section info), the
-   `PdbSymbols` RVA maps, and the iced-x86 decode pattern. Recorded as debt in
-   "NOT taken #1".
+2. **Structured data, not pre-rendered strings.** The index stores
+   `FunctionEntry { name, rva, size, file, statements[], instructions[] }`; the
+   tools render views from it. Required for the structure view and for diffing on
+   raw asm. (Owner: "structured output, like objdiff, without rendering".)
+   Originally we stored a rendered `block`; pivoted away from it.
 
-3. **Reuse the existing structure-tree output layout** (`utils_fs::open_file` +
-   `Files`), one file per source file, functions in RVA order. Keeps the new
-   artifact diffable side-by-side with `vostok-structure` and the carcass.
+3. **Per-instruction annotation is the instruction's SIZE, not an offset.**
+   (Owner correction.) Offsets drift on any size change and aren't what matching
+   compares. Sizes sum to the statement total (verified on `ghost_object`).
 
-4. **Offsets are function-relative hex** (`0x00`, `0x0C`, …), matching the
-   example and the existing `FUNCTION BODY` carcass convention, instead of
-   absolute VAs. Absolute VAs remain available but noisy; function-relative is
-   what makes base/target blocks line up.
+4. **Sizes render as hex with the word/anchor that disambiguates them.** Settled
+   on `<0xNN>` for the statement size inline, after iterating decimal `N bytes` →
+   `0xNN bytes` → the current `; <0xSIZE> ; <source>` inline form. Operands are
+   hex, so the size is marked to not read as an address.
 
-5. **Statement byte-size = span to the next statement's RVA** (last statement to
-   function end). This is what the `; 0xNN` annotation in the brief's example
-   encodes, and it's directly derivable from the already-sorted statement RVAs.
+5. **Listing format** (matches the owner's `sum_range` example, which is "a
+   slightly outdated display" so matched in spirit): offset-prefixed instructions
+   `0xNN:  <asm>`, with `; <0xSIZE> ; <source>` appended only on each statement's
+   first instruction; local labels on their own line. Target omits `<source>`.
 
-6. **Synthetic local labels (`.1`, `.2`)** for in-function branch targets, with
-   branch operands rewritten to them. Makes control flow readable without
-   absolute addresses and keeps base/target output stable under relocation.
+6. **Statement with no source → still anchored by offset.** Target (always) and
+   base inlined/headerless statements have no source text; the leading offset is
+   their anchor. (Owner: "instead of source code we can specify address [0xFF]"
+   then "also for target".) Line numbers are noise in the listing; kept in the
+   structure view (they are part of "source structure").
 
-7. **Single source of truth for the function list = module Procedure/Thunk
-   symbols** (delinker's approach), not the global public symbol table. Public
-   symbols lack reliable source-file attribution; module symbols give us the
-   line program and file in the same pass.
+7. **Synthetic local labels `.1/.2`** for in-function branch targets, operands
+   rewritten to them; call/data targets named from the PDB symbol maps (module
+   names win, public/mangled fill gaps).
 
-8. **Target mode prints `'<line>'` placeholders, identical structure otherwise.**
-   The brief states target == base minus source text; keeping byte/offset/label
-   logic mode-independent means the two outputs are directly comparable.
+8. **Query is served from a pre-built index, no per-query re-parse.** (Owner:
+   "rebuild completely, then query on top"; "we can always optimize".) Full
+   rebuild ~1.4 s; query over 24,467 functions ~0.13 s. Index is `index.jsonl`,
+   sorted (file, rva) for stable diffs.
 
-9. **Per-instruction annotation is the instruction's SIZE, not its offset.**
-   (User correction.) The brief's `0xNN:` leading column was being emitted as
-   offset-from-function-start; that drifts on any size change and isn't what
-   matching compares. Replaced with each instruction's byte length. These sum
-   exactly to the statement's total — verified on `bt_ghost_object::remove`
-   (3+4+2+3+3+4+2 = 0x15) and `contact_test` blocks. The merge logic (statement
-   ownership of `[start,end)`) is unchanged and the sums prove it correct.
+9. **`render_function` → `build_function`.** Returns the structured entry; the
+   signature is computed once by the caller and both keys the index and heads the
+   listing.
 
-10. **Sizes are rendered as `; 0xNN bytes` — hex value plus the literal word
-    `bytes`.** (User goal: "as straightforward as possible".) Hex keeps it
-    consistent with IDA/objdiff and the disasm operands; the word `bytes`
-    disambiguates it from an address/offset. Applies to both the statement-total
-    header and each instruction line.
+10. **Diff baseline = LCS over instruction text, computed before metadata.**
+    Produces an Equal/Delete/Insert op stream + match ratio (the retry-budget
+    signal). A matched function aligns near-100%; residual is label/symbol text
+    noise (see "not taken / objdiff-core").
 
-11. **Target statement header = size only (no line number).** (User: the line
-    number is "noise … useless for matching".) Base shows the real source line
-    (read from `source_root` via the PDB line number); target, having no source,
-    shows just `; N bytes`. Statement-header *format* otherwise left open — user
-    said "format let's discuss later".
+11. **Base↔target join by signature (`name`), not RVA.** RVAs differ between the
+    two binaries; names don't. `pdb_fetch` resolves the target match first, then
+    joins base by exact name.
 
-12. **No-source statement header is anchored by `[0xNN]` = function-relative
-    offset.** (User: "instead of source code we can specify address [0xFF]";
-    then "we can also specify it for target".) Applies to every statement whose
-    source text is unavailable — all target statements, and base statements from
-    inlined/headerless code. Replaces the bare `; 0xNN bytes` line. Chosen
-    function-relative offset (small hex, matches the user's `[0xFF]` example,
-    comparable base↔target) over absolute VA (would differ between binaries; an
-    easy switch if IDA-jump utility is wanted later). Offsets chain to the sizes
-    (`0x0+0x3=0x3`, `0x3+0x9=0xc`, …), confirming the merge once more.
-
-Smoke tests (both pass, 2026-05-30):
-* target: `vcproj2ninja/survarium.{exe,pdb}`, `--engine-path c:\survarium\sources`
-* base:   `vostok/binaries/Win32/survarium-dx11-win32-gold.{exe,pdb}`,
-  `--engine-path z:\home\sheep\projects\surv-decomp\vostok\sources`,
-  `--source-root vostok/sources` — real source lines render; disasm+sizes are
-  byte-identical to target for the matched `ghost_object.cpp`.
-
-13. **Query is served from a pre-built index, not a per-query PDB re-parse.**
-    (User: "always rebuild it completely and then have query on top of that";
-    "we can always optimize".) A full target rebuild measured at **~1.4 s**, so
-    the complete rebuild is cheap and stays the refresh step — no incremental /
-    caching machinery. The build now also writes `<out>/index.jsonl`: one JSON
-    `FunctionEntry { name, rva, size, file, block }` per line, sorted (file, rva).
-    New `pdb_rich_query` reads only that file:
-    * `--function <substr>` — case-insensitive signature substring (returns all
-      overloads), `--rva 0xNN` — exact, `--list` — `rva file signature` lines.
-    * Query over 24,467 target functions: **~0.13 s** → "immediately".
-    Trade-off accepted: the index duplicates the block text (target 72 MB). Fine
-    for now; obvious later optimizations (engine-preset filter, name→offset seek
-    index, demangle data symbols) deferred per "we can always optimize".
-    `render_function` was refactored to take the signature as a `&str` (computed
-    once in the caller) so the same string keys the index and heads the block.
+12. **Three CLIs, separated by role.** `pdb_rich_context` (build),
+    `pdb_rich_query` (discovery: `--list`/by name|rva), `pdb_fetch` (views +
+    diff). Mirrors the loop's "select from a list" then "fetch context" steps.
 
 ## Decisions NOT taken (and why)
 
-1. **Did NOT refactor `vostok-delinker` into a shared library.** Tempting (would
-   avoid copy-paste), but it's a working, separately-branched tool and lib-ifying
-   it is its own reviewable change. Deferred; the copied subset is small and
-   isolated. Revisit if the duplication grows.
+1. **Did NOT refactor the delinker into a shared lib.** Working, separately-
+   branched tool; lib-ifying it is its own change. We copied a small subset and
+   (for objdiff-core) will read its `.obj` files.
 
-2. **Did NOT emit COFF / reuse the relocation machinery.** We only *read* call
-   and data targets to *name* them in comments; we never produce object files.
-   The relocation-emission code (`relocs.rs`, `add_relocation_*`) is irrelevant
-   to a read-only listing and would add large surface area.
+2. **Did NOT integrate objdiff-core yet — but it is the next step.** (Owner:
+   "let's also try objdiff-core".) Feasible: objdiff-core v2.5 (`x86`) exists;
+   the delinker emits `binaries/objdiff/{base,target}/<file>.obj`, and our
+   `file` field maps to them. Deferred to a focused commit because it adds a
+   heavy dep + a second data path and needs a name→COFF-symbol join. The LCS
+   backend stays as the no-objfile fallback. Why not skip LCS? It needs no object
+   files and gives an immediate, good-enough signal.
 
-3. **Did NOT fold this into the existing `pdb_parser`/`gen_sources` carcass
-   output.** That writer is tuned for the compile-able stub carcass (LOCALS,
-   CONSTANTS, FUNCTION BODY comment block). Mixing real disassembly into it would
-   muddy both. New bin, shared helpers, separate output.
+3. **Did NOT build the agent loop / pragma management / compile orchestration.**
+   Explicitly deferred by the owner ("not the agentic loop just yet").
 
-4. **Did NOT add a disassembler beyond `iced-x86`.** It's already a delinker dep,
-   handles 32-bit x86, and gives flow-control + branch-target info we need for
-   labels. No reason to introduce capstone/zydis.
+4. **Did NOT implement version history of base attempts.** (Owner: "would be cool
+   … but maybe it doesn't need that.") Ties into the failure log and attempt
+   tracking, which belong with the loop. Logged in PLAN roadmap.
 
-5. **Did NOT attempt source-text recovery for target.** No source exists for the
-   original game; inventing/decompiling it is out of scope and would defeat the
-   purpose (the AI should reason from real disasm + line numbers, not a guess).
+5. **Did NOT keep the rendered `block` in the index.** Duplicated content and
+   blocks the structure/diff views; render on demand instead.
 
-6. **Did NOT special-case LTCG-optimized modules.** Per CLAUDE.md these are
-   intentionally not matched yet; the listing still renders them correctly
-   (offsets/sizes are byte-accurate regardless), we just don't add LTO-specific
-   annotations.
+6. **Did NOT add a disassembler beyond iced-x86, nor emit COFF/relocations.**
+   Read-only listing; we only name targets, never produce object files.
+
+## Open questions (carried for the owner — see PLAN "Open questions")
+
+Cluster detection source; failure-log schema; diff-distance metric; pragma-
+dependency state location; step-2 selection policy; cache key/invalidation.
 
 ## Tooling notes / hazards
 
-* The interactive shell returned **stale/garbled output** several times this
-  session (duplicated reads, phantom file listings). Verified ground truth with
-  `git ls-files`, `git status --porcelain`, and `stat` before trusting any `ls`.
-  Phantom `src/disasm.rs` etc. listings were confirmed non-existent via `stat`.
-  Lesson: confirm filesystem facts with non-cacheable, exit-code-bearing commands.
-* `pkill -9 find` was denied by the sandbox (would affect other PIDs) — avoid
-  process-wide signals; scope cleanup to known background-task IDs instead.
+- Toolchain is a nix flake (nightly Rust); build/run via `nix develop --command
+  cargo …`. `cargo` is not on PATH without the dev shell.
+- Earlier sessions saw stale/garbled interactive-shell output; confirm
+  filesystem facts with exit-code-bearing commands, not `ls` alone.
 
-## Next steps (implementation order)
+## Verification (2026-05-30)
 
-1. `src/statements.rs` — lift the statement-extraction loop from
-   `gen_sources::Module::build` into a reusable `for_symbol(program, offset)`.
-2. `src/disasm.rs` — `decode(bytes, va) -> Vec<DecodedInsn>` + label assignment,
-   patterned on `resolve_relative_relocations`.
-3. Port `Env`/`SecInfo` + `PdbSymbols` subset.
-4. `src/rich_context.rs` — orchestrate + merge + write via `Files`/`utils_fs`.
-5. `src/bin/pdb_rich_context.rs` — CLI.
-6. Smoke-test (base, then target); cross-check offsets vs the carcass.
+- Both indexes build: target 24,467 functions, base 17,434.
+- `pdb_fetch` structure/target/base/diff verified on
+  `physics/.../ghost_object.cpp`; statement sizes chain; matched `contact_test`
+  diffs ~90% (residual = label/symbol text noise), unmatched `create_ghost_object`
+  ~96%.
+- Clean build of all three bins (only the pre-existing `clap::Parser` warning in
+  `lib.rs`).
+
+## Next steps
+
+1. objdiff-core diff backend (operand/relocation-aware) over the delinker `.obj`s.
+2. `callees` / `info` views.
+3. Index compaction + carcass-comment stripping in base source text.
+4. (With the loop, later) version history + machine-readable failure log.

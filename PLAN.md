@@ -1,145 +1,205 @@
-# PLAN — `pdb_rich_context`: rich per-function context for binary matching
+# PLAN — rich context & fetch for AI binary matching
 
-## Goal
+## What this is
 
-A new binary that, for every engine function, emits a single human/AI-readable
-block that **interleaves the disassembly with the source-level statements** that
-produced it, annotated with byte sizes and offsets. This is the artifact the AI
-(and humans) read while matching: it puts "what the source statement was" next
-to "what machine code it compiled to", per statement, in one place.
+Tooling that turns the original game's PDB+EXE (and our compiled build's PDB+EXE)
+into a **structured, queryable context** an AI uses to binary-match the Vostok
+engine. For every function it pairs the disassembly with the source-level
+statements that produced it, stores that as structured data, and serves it on
+demand as different *views* (target listing, base listing, structure-only, or a
+base↔target diff).
 
-Two modes, same layout:
+It is the data layer under the matching loop described below. The loop itself
+(the agent that writes C++, compiles, and iterates) is **out of scope for now** —
+we are building the context and fetch primitives it will stand on.
 
-* **base** (`survarium-dx11-win32-gold.{exe,pdb}`) — source files exist on disk,
-  so each statement line shows the *actual source text*.
-* **target** (`survarium.{exe,pdb}`, original game) — no source available, so the
-  statement line shows only its line number / a placeholder; everything else
-  (disassembly, sizes, offsets) is identical.
+---
 
-### Target output (mirrors the brief's example)
+## The bigger picture: how AI binary matching should work
+
+(From the project owner's spec, organized. Items marked → are what this tooling
+feeds.)
+
+### Standing context the model needs (via SKILL.md)
+1. How formatting is done in the project.
+2. Which idioms `vostok` developers use — prefer these when matching.
+3. Common "source → assembly" mappings, to generate code efficiently.
+4. LTO/LTCG reality: argument elision and register-vs-stack calling-convention
+   differences are expected and not chased.
+
+### Per-function matching context → (this tooling)
+1. Structure of the **target** source from the PDB: number of statements and
+   their byte lengths. → `--view structure`, `--view target`.
+2. IDA decomp output for target (may be nonsensical under LTO). → not yet.
+3. Structure of the **base** (AI-generated) source. → `--view base`,
+   `--view structure` on the base index.
+4. IDA decomp output for base. → not yet.
+5. Base and target **assembly listings**. → `--view target` / `--view base`.
+6. Enriched listing = assembly interleaved with the structure above. → the
+   listing view already does this; the diff view aligns base vs target.
+
+   The owner's steer: provide **structured output, like objdiff, without
+   rendering** — so the model consumes alignment data, not a picture.
+
+### The loop (deferred — not built here)
+2. Pick a function from a continuously-updated list.
+3. Fetch its source (if any) + all matching context. → `pdb_fetch`.
+4. Generate a new version of the source.
+5. Compile it.
+6. Fetch matching context, analyze.
+7. 100% (or LTO-only artifacts) → mark complete, go to 2.
+8. Retry budget exhausted → record a machine-readable failure note, go to 2.
+9. Otherwise → go to 4.
+
+### Hard realities the loop must respect (deferred, but shape the data model)
+- **Linking is ~1 min per change.** Mitigate with batched matching → the diff
+  must support **multiple diffs against target in one pass**.
+- **Inlining is non-local.** A function inlines in one caller but not another;
+  `noinline` pragmas are global side effects. Added-to-fix-A can break-already-
+  matched-B → track per-pragma dependents and re-verify on change; the final
+  pragma-strip pass must re-test, not just re-compile.
+- **Match order:** callees and forced-inline helpers before their callers.
+- **Matching unit ≠ always a function:** LTCG inlining makes the output unit
+  sometimes a *cluster* of source functions against one target asm span. The
+  function list needs a cluster entry.
+- **Failure log is machine-readable:** attempt → {source-diff summary, asm diff
+  distance, classification, hypothesis}; fed back on retry.
+- **Retry budget is diff-distance based:** stop when the distance stops
+  shrinking, not at a fixed count.
+- **Failure taxonomy:** exact | match-modulo-regalloc/LTO | semantically-equal
+  different-codegen | wrong-semantics | structurally-wrong.
+- **Pre-filter before model calls:** instruction-count / basic-block / stack-
+  frame / rodata-constant deltas reject obviously-wrong source cheaply.
+- **Per-file hashes** can drop whole modules from matching.
+
+---
+
+## Architecture
 
 ```
-int64_t sum_range(int64_t n):
-{                ; 0x16
-0x00:    push rbp
-0x01:    mov  rbp, rsp
-0x04:    sub  rsp, 16
-0x08:    mov  [rbp-8], rdi
+ PDB + EXE  ──pdb_rich_context──►  <out>/sources/**      (human-browsable tree)
+ (per side)        (build)          <out>/index.jsonl     (structured, queryable)
 
-int64_t sum = 0  ; 0x03
-0x0C:    xor  rax, rax
-
-while (i <= n) { ; 0x06
-.1:
-0x16:    cmp  rcx, [rbp-8]
-0x1A:    jg   .2
-...
-}                ; 0x01
-0x28:    ret
+ index.jsonl ──pdb_rich_query──►   discover: --list / search by name|rva
+ (per side)  ──pdb_fetch──────►    fetch views: target | base | structure | diff
 ```
 
-* The text before `;` is the source statement (or `'<line>'` placeholder for
-  target). The `; 0xNN` is the **byte size of that statement's instruction run**.
-* `0xNN:` per instruction is the **offset from function start** (matches the
-  existing structure carcass convention; see `gen_sources.rs` FUNCTION BODY).
-* Local jump targets get synthetic labels (`.1`, `.2`) so reading flow needs no
-  absolute addresses.
+Two indexes are built — one for **target** (`survarium.{exe,pdb}`, the original
+game) and one for **base** (`survarium-dx11-win32-gold.{exe,pdb}`, our build).
+Base and target functions **join by signature** (`name`), which is identical
+across the two PDBs (RVAs differ, names don't).
 
-## What already exists (reuse, do not reinvent)
+"Rebuild completely, then query on top": a full rebuild is ~1.4 s, a query
+~0.13 s, so there is no incremental/caching machinery — the build is the refresh
+step.
 
-| Capability | Where | Reuse for |
+### Data model (`rich_context::FunctionEntry`, one JSON line per function)
+```
+FunctionEntry {
+  name:  String,            // full demangled signature (the join key)
+  rva:   u32,               // image-relative; merge key with the line program
+  size:  u32,               // function length in bytes
+  file:  String,            // source path, '/'-separated (maps to the .obj path)
+  statements:   [ Statement { off, size, line, source? } ],
+  instructions: [ Instruction { off, len, text, label? } ],
+}
+```
+- `instructions[].text` is the **normalized** mnemonic+operands (branch targets →
+  local labels `.1`, call/data targets → recovered symbol names). This is what
+  the diff aligns on, **before** any offset/size/source metadata is attached.
+- `statements` partition the function: each owns `[off, off+size)`, derived from
+  the PDB line program. `source` is the real source line in base mode, `None` in
+  target mode (or for inlined/headerless code).
+
+### Components (all in `vostok-pdb-parser/src`)
+- `rich_context.rs` — build: PDB+EXE → `FunctionEntry`; writes tree + index.
+- `rich_render.rs` — `render_listing` (offset-prefixed asm, `; <0xSIZE> ; <src>`
+  on each statement's first instruction) and `render_structure` (statement
+  skeleton only).
+- `rich_diff.rs` — `diff` (LCS over instruction text → Equal/Delete/Insert +
+  match ratio) and `render_unified`.
+- `rich_query.rs` — `search(index, {name substr, rva})`.
+- `bin/pdb_rich_context.rs` — build CLI (`--mode base|target`, `--out`).
+- `bin/pdb_rich_query.rs` — discovery: `--list` / fetch one by name|rva.
+- `bin/pdb_fetch.rs` — `--target-index`/`--base-index`, select by `--function`/
+  `--rva`, `--view target,base,structure,diff`.
+
+---
+
+## Diff
+
+The primitive is an objdiff-style op stream over the two instruction sequences,
+computed on normalized text **before metadata**, plus a match ratio (the retry-
+budget signal). Two backends:
+
+1. **Built-in LCS** (`rich_diff`) — done. No object files needed; a byte-
+   identical function aligns to all-`Equal`. **Known false positives:** synthetic
+   label renumbering, and a callee resolving to a different recovered name across
+   the two PDBs both show as diffs though the code is equal.
+
+2. **objdiff-core** (planned, owner-requested) — operand/relocation-aware, kills
+   those false positives. Integration path (feasible, verified inputs exist):
+   - The delinker already emits `binaries/objdiff/{base,target}/<file>.obj` and
+     an `objdiff.json`. Our `FunctionEntry.file` maps directly to `<file>.obj`.
+   - Add `objdiff-core` (v2.5, feature `x86`); read the two `.obj`s; run
+     `diff::diff_objs`; pick the symbol for our function; emit its structured
+     instruction diff. Keep LCS as the no-objfile fallback.
+   - Open: join our demangled `name` to the COFF symbol (store the mangled
+     `proc.name` in the index, or map by RVA→symbol).
+
+**Rendering:** structured op stream for the model; git-style unified view for
+humans. Batched matching will need many diffs against target in one pass.
+
+---
+
+## Views, recap
+
+| view | from | shows |
 |---|---|---|
-| PDB→per-function **statements** (RVA, source line, scope depth) via the module line program | `vostok-pdb-parser/src/gen_sources.rs` (`Module::build`, `Statement`) | statement boundaries + line numbers |
-| Function discovery (S_GPROC32/S_LPROC32 + thunks), per-function `.text` bytes, source-file resolution under `engine_path` | `vostok-delinker/src/{object_files.rs,pdb_symbols.rs,main.rs}` (`Env`, `get_function_location`, `add_function_symbol`) | function list, byte slices, file grouping |
-| x86 instruction-flow walk (follow branches/calls) | `vostok-delinker/src/object_files.rs` (`resolve_relative_relocations` via `iced-x86`) | disassembly decode loop pattern |
-| Symbol/RVA maps (functions, strings, constants, statics) | `vostok-delinker/src/pdb_symbols.rs` (`PdbSymbols`) | resolve call/data targets to names in the listing |
-| PE/PDB open + section info | `vostok-delinker/src/main.rs` (`Env::build`) | image base, `.text/.rdata/.data` SecInfo |
-| Type/function signature formatting | `vostok-pdb-parser/src/{pdb_parser.rs,formatter.rs}` | the function signature header line |
-| `iced-x86` formatting | new dep usage (crate already in delinker) | mnemonic/operand text |
+| `target` | target index | offset-prefixed listing, no source |
+| `base` | base index | same listing + real source lines inline |
+| `structure` | either | statement skeleton: offset, `<size>`, line/source, no asm |
+| `diff` | both | aligned base↔target instruction diff + match ratio |
 
-The crucial alignment: **both** `gen_sources.rs` and `object_files.rs` key
-functions by the same RVA (`text.rva + proc.offset.offset`). Statements carry
-RVAs; instructions carry IPs. So mapping instructions→statements is a sorted
-merge on RVA — no fuzzy matching needed.
+Planned views: `callees` (function + its callees' signatures/bodies, names
+already recovered in the disasm); `info` (locals/call-site metadata, as the
+carcass already extracts).
 
-## Where the code lives
+---
 
-This binary needs both PDB *type/line* parsing (pdb-parser side) **and** PE byte
-slicing + iced-x86 (delinker side). The delinker logic is the harder half and is
-not currently exposed as a library. Decision (see WORK.md): **build the new bin
-inside `vostok-pdb-parser`** and bring over the minimal delinker pieces, because
-pdb-parser already has the richer type/line tooling (`PdbParser`, `gen_sources`)
-that the listing's *source* half needs, whereas the delinker half we need is a
-small, well-isolated subset (decode loop + symbol map + section info).
+## Open questions (need owner decisions)
+1. **Cluster detection** — annotate the function list manually, or derive cluster
+   spans from PDB line info? Pick one.
+2. **Failure-log schema** — exact fields, or "machine-readable" stays aspirational.
+3. **Diff-distance metric** — instruction edit distance? basic-block diff?
+   operand-weighted? The retry-budget rule depends on it.
+4. **Pragma dependency state** — per-function metadata file, central manifest, or
+   build artifact?
+5. **Selection policy for step 2** — topological by callee-matched-first; handling
+   of no-matched-callees and cycles.
+6. **Cache key** — (source hash + toolchain hash) → asm; what else invalidates
+   (upstream header changes to the TU)?
 
-New files (all under `vostok-pdb-parser/src/`):
+## Deferred / roadmap
+- objdiff-core diff backend (next concrete step).
+- **Version history**: keep the last ~5 base index snapshots so the agent can
+  fetch prior attempts and avoid repeating dead ends. (Owner: "would be cool …
+  but maybe it doesn't need that.") Cheap to add once attempts are tracked; ties
+  into the failure log.
+- IDA decomp enrichment (target + base), expected-nonsensical under LTO.
+- Batch matching: multiple diffs against target per pass.
+- Pre-filters: instruction/BB/stack-frame/rodata deltas before model calls.
+- Compact the index (engine-preset filter, short field names, name→offset seek).
+- Strip inline carcass `// <addr>|...` comments from base statement source text.
+- Demangle data-symbol names (`?g_ph_allocator@...`).
 
-* `src/bin/pdb_rich_context.rs` — CLI (`--pdb`, `--exe`, `--out`, `--engine-path`,
-  `--mode base|target`). Mirrors `pdb_build_info.rs` / delinker `Cli`.
-* `src/rich_context.rs` — orchestration: open PE+PDB, build per-module function
-  map, for each function build a `RichFunction` and write it.
-* `src/disasm.rs` — thin wrapper over `iced-x86`: decode a `&[u8]` at a base IP
-  into `Vec<DecodedInsn { offset, len, ip, text, flow, branch_target }>`, plus
-  synthetic local-label assignment.
-* `src/statements.rs` — extract `Vec<Statement{ rva, line, depth, end_rva }>`
-  for one function from the module line program (lifted/trimmed from the parsing
-  half of `gen_sources::Module::build`, without the file-writing concerns).
-
-Library wiring: add `pub mod rich_context; pub mod disasm; pub mod statements;`
-to `lib.rs`. No changes to existing bins' behavior.
-
-## Algorithm (per function)
-
-1. **Discover functions** (delinker pattern): iterate DBI modules → module
-   symbols → `Procedure`/`Thunk`; resolve source file via
-   `get_function_location`; keep only files under `engine_path` (base) or keep
-   all engine-attributed ones (target). Record `(name, rva, size)`.
-2. **Slice bytes**: `text.data[off .. off+size]`.
-3. **Decode**: `disasm::decode(bytes, va_base)` → instruction list with offsets.
-4. **Statements**: `statements::for_symbol(program, proc.offset)` → sorted by
-   RVA, with each statement's end = next statement's start (last ends at
-   func_end). Carry `depth` for the `{`/block markers.
-5. **Source text** (base only): read the source file once (cache by path), index
-   by line number; map each statement → its source line text. Target: text is
-   `'<line>'`.
-6. **Merge**: walk instructions in offset order; for each statement bucket
-   `[start,end)` print the statement header (`source_text  ; 0x<size>`) then its
-   instructions (`0x<off>: <mnemonic> <ops>`). Instructions before the first
-   statement / in gaps attach to the nearest preceding statement (these are
-   prologue/inlined-call regions — flag large gaps like the existing carcass
-   does).
-7. **Labels**: pre-scan branch targets that land inside the function; assign
-   `.1,.2,…` in address order; emit a label line before the target instruction
-   and rewrite branch operands to the label.
-8. **Call/data names**: for `call`/branch/data refs whose target RVA is in
-   `PdbSymbols.{functions,strings,constants,statics}`, append a `; -> name`
-   comment (reuse delinker's closest-symbol selection).
-
-## Output file layout
-
-Mirror `vostok-structure`: one output file per source file (path taken from the
-line program, `\`→`/`, nested under `out/`), functions in RVA order within the
-file, each as the block above. Reuse `utils_fs::open_file` + the `Files` cache so
-the directory tree matches the existing structure exactly. A `--single-file`
-option dumps everything to one stream for quick diffing.
+## Out of scope (this tooling)
+- The matching agent/loop, pragma management, compile/link orchestration.
+- Rewriting the delinker into a shared lib (we read its `.obj` outputs as files).
+- RTTI/vftable recovery, layout asserts (separate `IMPROVEMENTS.md` items).
 
 ## Verification
-
-* **Smoke**: run base mode against `vostok/binaries/Win32/survarium-dx11-win32-gold.*`
-  with `--engine-path vostok/sources`; pick a small known-matched function
-  (e.g. `physics/.../ghost_object.cpp`) and eyeball that statement sizes sum to
-  function size and offsets are contiguous.
-* **Cross-check offsets** against the existing carcass `FUNCTION BODY` block for
-  the same function — the per-statement RVAs must agree.
-* **Target**: run against `survarium.{exe,pdb}`; confirm identical structure with
-  `'<line>'` placeholders and that disassembly decodes cleanly to `ret`.
-* **Determinism**: byte-identical output across two runs.
-
-## Out of scope (this binary)
-
-* Rewriting the delinker to be a shared lib (tracked separately; we copy the
-  minimal subset now — see WORK.md "not taken").
-* RTTI/vftable recovery, layout asserts, link-order — separate roadmap items in
-  `IMPROVEMENTS.md`.
-* Relocation *emission* (COFF) — we only *read* targets to name them, we do not
-  produce object files.
+- Build base+target indexes; `pdb_fetch` structure/target/base/diff on
+  `physics/.../ghost_object.cpp`. Statement sizes chain; a matched function
+  diffs near-100% (residual = label/symbol text noise → objdiff-core).
+- Determinism: index sorted by (file, rva); byte-stable across runs.
