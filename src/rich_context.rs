@@ -69,6 +69,14 @@ pub struct Instruction {
     pub label: Option<String>,
 }
 
+/// A PDB-recorded local variable (name + type). Approximate under LTO — some are
+/// optimized out, and register locals may be indistinguishable from arguments.
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Local {
+    pub name: String,
+    pub ty: String,
+}
+
 /// One source-level statement (a line-program boundary) and the byte span it
 /// compiled to.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -104,6 +112,9 @@ pub struct FunctionEntry {
     pub statements: Vec<Statement>,
     /// Instructions, in address order.
     pub instructions: Vec<Instruction>,
+    /// PDB-recorded local variables (approximate under LTO).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locals: Vec<Local>,
 }
 
 pub struct Options {
@@ -165,84 +176,118 @@ pub fn dump_rich_context(pdb_path: &Path, exe_path: &Path, opts: &Options) -> cr
             let program = module_info.line_program()?;
             let mut syms = module_info.symbols()?;
 
+            // Track the procedure whose scope we are inside, so its locals
+            // (which follow the Procedure symbol) attach to the right entry.
+            let mut current_entry: Option<usize> = None;
+            let mut current_end = pdb::SymbolIndex(0);
+
             while let Some(sym) = syms.next()? {
-                let proc = match sym.parse() {
-                    Ok(pdb::SymbolData::Procedure(proc)) => proc,
-                    _ => continue,
-                };
-                if proc.len == 0 {
-                    continue;
+                // Once we pass the current procedure's end symbol, its scope (and
+                // any nested blocks) is closed.
+                if current_entry.is_some() && sym.index() >= current_end {
+                    current_entry = None;
                 }
 
-                let Some(func_rva) = proc.offset.to_rva(&address_map) else {
-                    continue;
-                };
-                let func_rva = func_rva.0 as usize;
-                let size = proc.len as usize;
+                match sym.parse() {
+                    Ok(pdb::SymbolData::Procedure(proc)) => {
+                        current_entry = None;
+                        current_end = proc.end;
 
-                // Only functions whose body lives in .text can be disassembled.
-                if func_rva < text_rva || func_rva + size > text_rva + text_data.len() {
-                    continue;
-                }
+                        // Build the entry; `break 'build None` skips (non-.text,
+                        // no line info, non-engine in tree mode, …) without losing
+                        // scope tracking. `?` still propagates real PDB errors.
+                        let built: Option<usize> = 'build: {
+                            if proc.len == 0 {
+                                break 'build None;
+                            }
+                            let Some(func_rva) = proc.offset.to_rva(&address_map) else {
+                                break 'build None;
+                            };
+                            let func_rva = func_rva.0 as usize;
+                            let size = proc.len as usize;
+                            if func_rva < text_rva || func_rva + size > text_rva + text_data.len() {
+                                break 'build None;
+                            }
 
-                // ── statements: (rva, source-line) from the line program ──────
-                let mut stmts: Vec<(u32, u32)> = Vec::new();
-                let mut file_name: Option<String> = None;
-                let mut lines = program.lines_for_symbol(proc.offset);
-                while let Some(li) = lines.next()? {
-                    if let Some(rva) = li.offset.to_rva(&address_map) {
-                        stmts.push((rva.0, li.line_start));
+                            // ── statements: (rva, source-line) from line program ──
+                            let mut stmts: Vec<(u32, u32)> = Vec::new();
+                            let mut file_name: Option<String> = None;
+                            let mut lines = program.lines_for_symbol(proc.offset);
+                            while let Some(li) = lines.next()? {
+                                if let Some(rva) = li.offset.to_rva(&address_map) {
+                                    stmts.push((rva.0, li.line_start));
+                                }
+                                if file_name.is_none() {
+                                    let fi = program.get_file_info(li.file_index)?;
+                                    file_name =
+                                        Some(fi.name.to_string_lossy(&string_table)?.into_owned());
+                                }
+                            }
+                            if stmts.is_empty() {
+                                break 'build None;
+                            }
+                            stmts.sort_by_key(|(rva, _)| *rva);
+                            stmts.dedup_by_key(|(rva, _)| *rva);
+
+                            let file_name = file_name.unwrap_or_default();
+                            let lower = file_name.to_lowercase().replace('/', "\\");
+                            let rel = lower.strip_prefix(&opts.engine_path).map(|s| s.to_string());
+
+                            // Tree output only carries engine files; stdout all.
+                            if opts.out_dir.is_some() && rel.is_none() {
+                                break 'build None;
+                            }
+
+                            let src_lines: Option<&Vec<String>> = match (&opts.source_root, &rel) {
+                                (Some(root), Some(rel)) if !opts.target_mode => {
+                                    let entry = source_cache.entry(rel.clone()).or_insert_with(|| {
+                                        let path = root.join(rel.replace('\\', "/"));
+                                        std::fs::read_to_string(&path)
+                                            .ok()
+                                            .map(|s| s.lines().map(str::to_string).collect())
+                                    });
+                                    entry.as_ref()
+                                }
+                                _ => None,
+                            };
+
+                            let signature = fmt
+                                .emit_function_orig(&proc.name, module_id, proc.type_index)
+                                .unwrap_or_else(|_| proc.name.to_string().into_owned());
+
+                            let file = rel.unwrap_or(file_name).replace('\\', "/");
+                            // Decorated name for the objdiff/.obj join; module
+                            // symbols only give the undecorated form.
+                            let mangled = symbols
+                                .public_functions
+                                .get(&func_rva)
+                                .cloned()
+                                .unwrap_or_else(|| proc.name.to_string().into_owned());
+
+                            entries.push(build_function(
+                                signature, mangled, &symbols, image_base, text_rva, &text_data,
+                                func_rva, size, &stmts, src_lines, file,
+                            ));
+                            Some(entries.len() - 1)
+                        };
+                        current_entry = built;
                     }
-                    if file_name.is_none() {
-                        let fi = program.get_file_info(li.file_index)?;
-                        file_name = Some(fi.name.to_string_lossy(&string_table)?.into_owned());
+
+                    // Locals within the current procedure scope. Stack locals are
+                    // negative-offset base-pointer-relative; register locals come
+                    // through under optimization. Args (offset >= 0) are skipped —
+                    // they are already in the signature.
+                    Ok(pdb::SymbolData::BasePointerRelative(b)) if b.offset < 0 => {
+                        push_local(&mut entries, current_entry, &fmt, module_id, b.type_index, b.name);
                     }
-                }
-                if stmts.is_empty() {
-                    continue;
-                }
-                stmts.sort_by_key(|(rva, _)| *rva);
-                stmts.dedup_by_key(|(rva, _)| *rva);
-
-                let file_name = file_name.unwrap_or_default();
-                let lower = file_name.to_lowercase().replace('/', "\\");
-                let rel = lower.strip_prefix(&opts.engine_path).map(|s| s.to_string());
-
-                // Tree output only carries engine files; stdout carries all.
-                if opts.out_dir.is_some() && rel.is_none() {
-                    continue;
-                }
-
-                let src_lines: Option<&Vec<String>> = match (&opts.source_root, &rel) {
-                    (Some(root), Some(rel)) if !opts.target_mode => {
-                        let entry = source_cache.entry(rel.clone()).or_insert_with(|| {
-                            let path = root.join(rel.replace('\\', "/"));
-                            std::fs::read_to_string(&path)
-                                .ok()
-                                .map(|s| s.lines().map(str::to_string).collect())
-                        });
-                        entry.as_ref()
+                    Ok(pdb::SymbolData::RegisterRelative(r)) => {
+                        push_local(&mut entries, current_entry, &fmt, module_id, r.type_index, r.name);
                     }
-                    _ => None,
-                };
-
-                let signature = fmt
-                    .emit_function_orig(&proc.name, module_id, proc.type_index)
-                    .unwrap_or_else(|_| proc.name.to_string().into_owned());
-
-                let file = rel.unwrap_or(file_name).replace('\\', "/");
-                // Decorated name for the objdiff/.obj join; module symbols only
-                // give the undecorated form, so prefer the Public-symbol name.
-                let mangled = symbols
-                    .public_functions
-                    .get(&func_rva)
-                    .cloned()
-                    .unwrap_or_else(|| proc.name.to_string().into_owned());
-
-                entries.push(build_function(
-                    signature, mangled, &symbols, image_base, text_rva, &text_data, func_rva, size,
-                    &stmts, src_lines, file,
-                ));
+                    Ok(pdb::SymbolData::RegisterVariable(v)) => {
+                        push_local(&mut entries, current_entry, &fmt, module_id, v.type_index, v.name);
+                    }
+                    _ => {}
+                }
             }
         }
 
@@ -341,7 +386,31 @@ fn build_function(
         file,
         statements,
         instructions,
+        locals: Vec::new(),
     }
+}
+
+/// Append a PDB local (`name: ty`) to the in-scope function entry, if any. Skips
+/// the implicit `this`. Type formatting is best-effort (LTO loses some).
+fn push_local(
+    entries: &mut [FunctionEntry],
+    current: Option<usize>,
+    fmt: &PdbParser,
+    module_id: usize,
+    type_index: pdb::TypeIndex,
+    name: pdb::RawString<'_>,
+) {
+    let Some(ci) = current else {
+        return;
+    };
+    if name.as_bytes() == b"this" {
+        return;
+    }
+    let ty = fmt.emit_type_impl(module_id, type_index).unwrap_or_default();
+    entries[ci].locals.push(Local {
+        name: name.to_string().into_owned(),
+        ty,
+    });
 }
 
 /// Strip a trailing carcass annotation comment (`// <0x...>|...:'NNN'`) that the

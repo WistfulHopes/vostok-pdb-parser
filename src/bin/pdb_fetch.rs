@@ -31,7 +31,7 @@ use vostok_pdb_parser::rich_context::FunctionEntry;
 use vostok_pdb_parser::rich_diff;
 use vostok_pdb_parser::rich_objdiff;
 use vostok_pdb_parser::rich_query::{search, Query};
-use vostok_pdb_parser::rich_render::{render_listing, render_structure};
+use vostok_pdb_parser::rich_render::{render_info, render_listing, render_structure};
 
 #[derive(Parser)]
 struct Cli {
@@ -154,6 +154,10 @@ fn main() {
             },
             "structure" => match target.as_ref().or(base.as_ref()) {
                 Some(f) => print!("{}", render_structure(f)),
+                None => {}
+            },
+            "info" => match target.as_ref().or(base.as_ref()) {
+                Some(f) => print!("{}", render_info(f)),
                 None => {}
             },
             "callees" => {

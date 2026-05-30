@@ -41,6 +41,18 @@ pub fn render_listing(f: &FunctionEntry) -> String {
     out
 }
 
+/// Function info: the PDB-recorded locals (`type  name`). Approximate under LTO
+/// — some are optimized out and register locals may overlap arguments.
+pub fn render_info(f: &FunctionEntry) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "{}:", f.name);
+    let _ = writeln!(out, "; locals ({}) — PDB-recorded, approximate under LTO", f.locals.len());
+    for l in &f.locals {
+        let _ = writeln!(out, "  {}\t{}", l.ty, l.name);
+    }
+    out
+}
+
 /// Structure-only: the statement skeleton (offset, size, line, source) without
 /// any disassembly — "the amount of statements and their length", which is the
 /// cheap structural signal a matcher can compare before generating code.

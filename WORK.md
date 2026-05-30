@@ -141,13 +141,17 @@ dependency state location; step-2 selection policy; cache key/invalidation.
 
 ## Next steps
 
-1. `info` view (locals / call-site metadata the carcass already extracts);
-   optional `callees` with full bodies, not just signatures.
-2. Index compaction + carcass-comment stripping in base source text.
-3. objdiff diff: surface the structured op stream to the model (not just the
+1. Index compaction (engine-preset filter, name→offset seek, short field names).
+2. objdiff diff: surface the structured op stream to the model (not just the
    rendered text), and the target-side offsets too.
+3. Call-site metadata for indirect calls; optional `callees` with full bodies.
 4. (With the loop, later) version history + machine-readable failure log.
 
 Done since the last rewrite: objdiff source/offset interleaving (keyed by
 objdiff instruction address, robust to differing instruction splits); `callees`
-view (`rich_callees`).
+view (`rich_callees`); carcass-comment stripping in base source text; `info`
+view (PDB-recorded locals via scope-tracked BPRel/RegRel/RegVar symbols).
+
+Note: the locals loop tracks procedure scope via `Symbol::index()` vs the
+procedure's `end` index (no fragile depth counter), so locals attach to the
+right entry and skipped procedures don't leak locals onto the previous one.
