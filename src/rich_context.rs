@@ -322,7 +322,7 @@ fn build_function(
             let source = src_lines
                 .filter(|_| line != 0)
                 .and_then(|lines| lines.get((line as usize).wrapping_sub(1)))
-                .map(|s| s.trim().to_string())
+                .map(|s| strip_carcass_comment(s).to_string())
                 .filter(|s| !s.is_empty());
             Statement {
                 off: start_off,
@@ -342,6 +342,15 @@ fn build_function(
         statements,
         instructions,
     }
+}
+
+/// Strip a trailing carcass annotation comment (`// <0x...>|...:'NNN'`) that the
+/// vostok carcass stubs embed inline in source lines, leaving just the code.
+/// Only the angle-bracket address marker `// <` is matched, so ordinary `//`
+/// comments are untouched.
+fn strip_carcass_comment(line: &str) -> &str {
+    let cut = line.find("// <").unwrap_or(line.len());
+    line[..cut].trim()
 }
 
 /// Build RVA -> name maps for call/data target annotation. Module symbols
