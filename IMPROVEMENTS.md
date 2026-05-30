@@ -126,12 +126,28 @@ Everything below is *not* yet done.
 
 ## Branch summary
 
-| Branch | Scope | Confidence |
+All seven are implemented on their branches (off this roadmap commit) and
+verified against the real `survarium.pdb` / `survarium.exe`. None is merged —
+review and merge each independently.
+
+| Branch | Scope | Status / result |
 |---|---|---|
-| `improve/static-keyword`     | A | high |
-| `improve/pe-build-info`      | B | high |
-| `improve/locals-frame-order` | C | medium |
-| `improve/layout-asserts`     | D | medium |
-| `improve/link-order`         | E | medium |
-| `improve/typedefs`           | F | medium-low |
-| `improve/rtti-vftables`      | G | low (large) |
+| `improve/static-keyword`     | A | done — 757 free statics emitted, no `Class::method` false positives |
+| `improve/pe-build-info`      | B | done — new `pe_build_info` bin; Rich header confirms VS2008 SP1 (build 30729) + toolchain-drift diff |
+| `improve/locals-frame-order` | C | done — LOCALS sorted by `S_BPREL32` offset, annotated `@ <hex>` |
+| `improve/layout-asserts`     | D | done — `--emit-layout-asserts` writes 1986 `sizeof` guards (C++03 macro) |
+| `improve/link-order`         | E | done — new `pdb_link_order` bin; 2260 code modules in link order, 251 inversions vs base |
+| `improve/typedefs`           | F | done — `char*`→`pstr`, `void*`→`pvoid` (2570 / 25558 emitted) |
+| `improve/rtti-vftables`      | G | done — new `pe_rtti` bin; 1072 RTTI classes + 670 templates from the EXE |
+
+### New binaries
+
+| Bin | What |
+|---|---|
+| `pe_build_info`  | PE header / Rich header / CodeView / version, `--compare` diff |
+| `pdb_link_order` | module link order from section contributions, `--compare` diff |
+| `pe_rtti`        | RTTI class enumeration from the EXE, `--compare` diff |
+
+### New `pdb_parser` flags
+
+* `--emit-layout-asserts` — write `headers/_layout_asserts.h` (`sizeof` guards).
