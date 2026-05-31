@@ -173,19 +173,6 @@ INFO`); optionally `callees` with full bodies, not just signatures.
 
 ---
 
-## Open questions (need owner decisions)
-1. **Cluster detection** — annotate the function list manually, or derive cluster
-   spans from PDB line info? Pick one.
-2. **Failure-log schema** — exact fields, or "machine-readable" stays aspirational.
-3. **Diff-distance metric** — instruction edit distance? basic-block diff?
-   operand-weighted? The retry-budget rule depends on it.
-4. **Pragma dependency state** — per-function metadata file, central manifest, or
-   build artifact?
-5. **Selection policy for step 2** — topological by callee-matched-first; handling
-   of no-matched-callees and cycles.
-6. **Cache key** — (source hash + toolchain hash) → asm; what else invalidates
-   (upstream header changes to the TU)?
-
 ## Deferred / roadmap
 - **Version history**: keep the last ~5 base index snapshots so the agent can
   fetch prior attempts and avoid repeating dead ends. (Owner: "would be cool …
@@ -208,3 +195,38 @@ INFO`); optionally `callees` with full bodies, not just signatures.
   `physics/.../ghost_object.cpp`. Statement sizes chain; a matched function
   diffs near-100% (residual = label/symbol text noise → objdiff-core).
 - Determinism: index sorted by (file, rva); byte-stable across runs.
+
+---
+
+## DONE — Resolved decisions (2026-05-31, with the project owner)
+
+Settled against how the loop actually works (`vostok/docs/binary_matching/`):
+
+1. **Cluster detection — none (diff-reactive).** MSVC 8.0 PDBs carry no
+   inline-site records: empirically **0 `S_INLINESITE`** across both PDBs
+   (`survarium.pdb` 2396 modules / 47,792 procs, and our base PDB), checked at the
+   raw CodeView-kind level with 0 parse errors. Inlining is inferred from the diff
+   (missing/extra `call` + large statement-offset delta), per `agentic_loop.md` §5.
+   No cluster machinery. (Recorded in the loop's `unanswered_questions.md`.)
+2. **Failure log — the loop's existing artifacts, no separate schema.**
+   `STATE[..%|PARTIAL]` markers are the machine-greppable layer; the per-function
+   `docs/binary_matching/<module>/<fn>.md` is the human detail. (Optional: a fixed
+   classification vocabulary in the Outcome line.)
+3. **Retry metric — objdiff `match_percent` (primary) + non-equal row count
+   (tiebreaker).** Operand/relocation-aware; the row count is only a tiebreaker
+   because legitimate LTCG/linker effects (regalloc, stack-slot layout) surface as
+   `~` rows. Stop when match % plateaus.
+4. **Pragmas — out of scope.** The loop does not steer inlining (`agentic_loop.md`
+   §5), so there is no pragma-dependency state to track. (Inline-control trade-offs
+   to be noted in `unanswered_questions.md`.)
+5. **Selection policy — smallest-first, then topological (leaf-first).** Soft
+   ordering; each function is a human-reviewed PR. Prefer target-asm size.
+6. **Cache key — deferred.** The loop does a full ~1-min rebuild; no source→asm
+   cache exists to key. If per-TU incremental lands, key on the preprocessed TU
+   (source + headers) + flags + toolchain.
+
+**Tool reconciliation:** `report.json` stays the *scoreboard* (per-function match %
++ regressions per rebuild); `pdb_fetch` is the *microscope* the agent reads for
+target asm (loop §2) and the instruction diff (loop §2a). The loop rebuilds the
+base index each compile (`generate_rich.py` via `rebuild.py`); the target index is
+built once (`setup-toolchain.py`).

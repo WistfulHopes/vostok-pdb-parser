@@ -155,3 +155,25 @@ view (PDB-recorded locals via scope-tracked BPRel/RegRel/RegVar symbols).
 Note: the locals loop tracks procedure scope via `Symbol::index()` vs the
 procedure's `end` index (no fragile depth counter), so locals attach to the
 right entry and skipped procedures don't leak locals onto the previous one.
+
+## Session 2026-05-31: open questions resolved + loop reconciliation
+
+- Wrote `CLAUDE.md` (operator's manual, verified example output for every view).
+- **All six PLAN "Open questions" resolved with the owner** (see PLAN "DONE —
+  Resolved decisions"). Headlines: retry metric = objdiff match% + row count;
+  selection = smallest-then-topological; failure log = the loop's existing
+  STATE markers + per-function markdown (no JSONL); pragmas = out of scope;
+  cache key = deferred; clusters = diff-reactive.
+- **Cluster question settled empirically.** A throwaway `probe_inlines` bin found
+  **0 `S_INLINESITE`** records in both PDBs (target: 2396 modules / 47,792 procs,
+  0 parse errors; base likewise) even at the raw CodeView-kind level. MSVC 8.0
+  emits no inline-site debug info, so PDB-derived clustering is impossible on this
+  toolchain. Probe deleted after use; finding recorded in the loop's
+  `unanswered_questions.md` (closed item) and PLAN.
+- **Reconciliation with the loop:** `report.json` = scoreboard; `pdb_fetch` =
+  the agent's microscope for target asm + instruction diff. Wired it into the
+  vostok repo: new `scripts/generate_rich.py`, a "base rich index" step in
+  `rebuild.py`, target-side once in `setup-toolchain.py`, and `agentic_loop.md`
+  §2/§2a now call `pdb_fetch`/`pdb_rich_query` over `binaries/rich/{base,target}`.
+  This delivers `unanswered_questions.md` wishlist #3 (target asm) and #4
+  (instruction diff). Indexes live at `binaries/rich/{base,target}/index.jsonl`.
