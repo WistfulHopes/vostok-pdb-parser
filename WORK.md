@@ -171,6 +171,13 @@ right entry and skipped procedures don't leak locals onto the previous one.
   emits no inline-site debug info, so PDB-derived clustering is impossible on this
   toolchain. Probe deleted after use; finding recorded in the loop's
   `unanswered_questions.md` (closed item) and PLAN.
+- **`pdb_fetch --view diff` now reports a FUZZY match** (`rich_objdiff::fuzzy_credit`).
+  objdiff-core 2.5.0's symbol `match_percent` is strict (every differing instruction
+  a full miss → e.g. 56% where the scoreboard's fuzzy `report.json` says 89%), a
+  foot-gun. We recompute a target-byte-weighted fuzzy (opcode + per-operand partial
+  credit; base-only `-` rows weigh 0) that tracks `report.json` closely but slightly
+  conservatively (`notify_objects_inside` 89.6 vs 89.3; not bit-identical — different
+  objdiff version). Header now `objdiff fuzzy match P%`.
 - **Reconciliation with the loop:** `report.json` = scoreboard; `pdb_fetch` =
   the agent's microscope for target asm + instruction diff. Wired it into the
   vostok repo: new `scripts/generate_rich.py`, a "base rich index" step in

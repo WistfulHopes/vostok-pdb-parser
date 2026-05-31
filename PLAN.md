@@ -148,9 +148,13 @@ budget signal). Two backends:
    (our `FunctionEntry.file` maps straight to them), `diff::diff_objs`, find our
    symbol by its decorated name (`FunctionEntry.mangled`, taken from the PDB
    **Public** symbol — the module symbol is undecorated and does not match the
-   COFF name), emit `match_percent` + the aligned instruction rows. LCS stays as
-   the no-objfile fallback. Verified: `contact_test(world*)` = 94.95%, with the
-   mismatches being register-allocation differences (the expected LTO artifacts).
+   COFF name), emit a **fuzzy** `match_percent` + the aligned instruction rows.
+   objdiff-core 2.5.0's own symbol `match_percent` is *strict* (any differing
+   instruction is a full miss), which understates LTCG code and disagrees with the
+   scoreboard's `report.json`; so `rich_objdiff` recomputes a target-byte-weighted
+   fuzzy match (`fuzzy_credit`: opcode + per-operand credit, base-only rows weigh 0)
+   that tracks `report.json` closely (e.g. `notify_objects_inside` 89.6 vs 89.3).
+   LCS stays the no-objfile fallback.
 
 **Rendering:** structured op stream for the model; git-style unified view for
 humans. Batched matching will need many diffs against target in one pass.

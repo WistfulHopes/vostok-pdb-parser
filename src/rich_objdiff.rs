@@ -46,7 +46,9 @@ pub struct ObjdiffRow {
 }
 
 pub struct ObjdiffResult {
-    /// Instruction-level match percent (0..100). The retry-budget signal.
+    /// Fuzzy instruction-level match percent (0..100): partial per-instruction
+    /// credit, so it tracks the scoreboard (`report.json`) rather than objdiff-core
+    /// 2.5.0's strict all-or-nothing match. The retry-budget signal.
     pub match_percent: f32,
     pub rows: Vec<ObjdiffRow>,
 }
@@ -71,8 +73,6 @@ pub fn diff(base_obj: &Path, target_obj: &Path, mangled: &str) -> crate::Result<
     let Some(bsym) = find_symbol(base_diff, &base, mangled) else {
         return Ok(None);
     };
-    let match_percent = bsym.match_percent.unwrap_or(0.0);
-
     // The base function's first instruction address is the origin for offsets.
     let origin = bsym
         .instructions
@@ -80,19 +80,66 @@ pub fn diff(base_obj: &Path, target_obj: &Path, mangled: &str) -> crate::Result<
         .find_map(|d| d.ins.as_ref().map(|i| i.address))
         .unwrap_or(0);
 
-    // objdiff aligns the two streams into equal-length rows when the symbols are
-    // paired; zip them. If unpaired/mismatched, fall back to the base side.
-    let rows = match bsym.target_symbol.map(|r| target_diff.symbol_diff(r)) {
-        Some(tsym) if tsym.instructions.len() == bsym.instructions.len() => bsym
-            .instructions
-            .iter()
-            .zip(tsym.instructions.iter())
-            .map(|(l, r)| make_row(l, r, origin))
-            .collect(),
-        _ => bsym.instructions.iter().map(|l| make_row(l, l, origin)).collect(),
+    // objdiff-core 2.5.0's symbol `match_percent` is STRICT (any differing
+    // instruction is a full miss), which badly understates LTCG-heavy code and
+    // disagrees with the scoreboard's fuzzy `report.json` (e.g. 56% vs 89%). When
+    // the two symbols are paired we recompute a FUZZY match here via partial
+    // per-instruction credit (see `fuzzy_credit`); unpaired -> strict fallback.
+    let (rows, match_percent) = match bsym.target_symbol.map(|r| target_diff.symbol_diff(r)) {
+        Some(tsym) if tsym.instructions.len() == bsym.instructions.len() => {
+            let mut score = 0.0f32;
+            let mut max = 0.0f32;
+            let rows = bsym
+                .instructions
+                .iter()
+                .zip(tsym.instructions.iter())
+                .map(|(l, r)| {
+                    let (s, m) = fuzzy_credit(l, r);
+                    score += s;
+                    max += m;
+                    make_row(l, r, origin)
+                })
+                .collect();
+            let pct = if max > 0.0 { score / max * 100.0 } else { 100.0 };
+            (rows, pct)
+        }
+        _ => (
+            bsym.instructions.iter().map(|l| make_row(l, l, origin)).collect(),
+            bsym.match_percent.unwrap_or(0.0),
+        ),
     };
 
     Ok(Some(ObjdiffResult { match_percent, rows }))
+}
+
+/// Fuzzy per-instruction credit `(score, max)` for one aligned pair, **weighted by
+/// instruction byte size** to track the scoreboard's `report.json` (which is
+/// byte-weighted), not objdiff-core 2.5.0's strict all-or-nothing instruction
+/// match. Within an instruction the match fraction is objdiff's "1 for the opcode +
+/// 1 per operand" scheme, so a stack-slot-only `~` keeps most of its bytes.
+fn fuzzy_credit(l: &ObjInsDiff, r: &ObjInsDiff) -> (f32, f32) {
+    let bytes = |d: &ObjInsDiff| d.ins.as_ref().map_or(0u8, |i| i.size) as f32;
+    // Target-relative (like report.json): weigh by the TARGET instruction's bytes,
+    // so a base-only `-` (Delete, no target side) weighs 0 and extra base code does
+    // not penalize - only how much of the target we reproduced counts.
+    let weight = bytes(r);
+    let frac = match l.kind {
+        // Identical: full credit.
+        ObjInsDiffKind::None => 1.0,
+        // Same shape, some operands differ. ArgMismatch keeps the opcode (credit
+        // it); OpMismatch changed the mnemonic (no opcode credit). Credit each
+        // matching operand (a `None` entry in arg_diff).
+        ObjInsDiffKind::ArgMismatch | ObjInsDiffKind::OpMismatch => {
+            let total = l.arg_diff.len();
+            let matched = l.arg_diff.iter().filter(|d| d.is_none()).count();
+            let op = if matches!(l.kind, ObjInsDiffKind::ArgMismatch) { 1.0 } else { 0.0 };
+            (op + matched as f32) / (1.0 + total as f32)
+        }
+        // Replace (different op/arg-count) or Delete/Insert (one side only): no
+        // credit, but its bytes still count against the total.
+        _ => 0.0,
+    };
+    (weight * frac, weight)
 }
 
 fn make_row(l: &ObjInsDiff, r: &ObjInsDiff, origin: u64) -> ObjdiffRow {
@@ -118,7 +165,7 @@ fn make_row(l: &ObjInsDiff, r: &ObjInsDiff, origin: u64) -> ObjdiffRow {
 pub fn render(result: &ObjdiffResult, base: &FunctionEntry) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}:", base.name);
-    let _ = writeln!(out, "; objdiff match {:.2}%", result.match_percent);
+    let _ = writeln!(out, "; objdiff fuzzy match {:.2}%", result.match_percent);
 
     let stmt_at: HashMap<u32, &Statement> = base.statements.iter().map(|s| (s.off, s)).collect();
 
