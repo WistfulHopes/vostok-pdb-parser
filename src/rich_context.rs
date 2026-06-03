@@ -117,6 +117,30 @@ pub struct FunctionEntry {
     pub locals: Vec<Local>,
 }
 
+impl FunctionEntry {
+    /// A *body-less* function is one whose source body is empty `{}` — a
+    /// member-initializer-list ctor, a default/empty ctor, an empty virtual
+    /// override. Its only statements are the synthetic frame braces, so it
+    /// carries no real body statement.
+    ///
+    /// The two PDBs encode this differently, so we accept either form:
+    ///   * **base** (real sources): exactly two statements whose source texts are
+    ///     the opening `{` and closing `}` brace lines, nothing between.
+    ///   * **target** (no sources): a single statement — the decl-line skeleton
+    ///     spanning the whole function.
+    ///
+    /// Both render as an empty FUNCTION BODY (header only), which removes the
+    /// confusing "1 vs 2 statements" mismatch for trivially-matching bodies.
+    /// Any function with a real body statement is *not* body-less.
+    pub fn is_body_less(&self) -> bool {
+        match self.statements.as_slice() {
+            [_] => true,
+            [a, b] => a.source.as_deref() == Some("{") && b.source.as_deref() == Some("}"),
+            _ => false,
+        }
+    }
+}
+
 pub struct Options {
     /// Recorded source-path prefix to strip (lowercased, `\`-separated, trailing
     /// `\`), e.g. `c:\survarium\sources\`. Used to identify engine files and to

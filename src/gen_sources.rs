@@ -845,21 +845,6 @@ impl<'a> Function<'a> {
                 },
             };
 
-            let mut non_empty_body = statements.len() > 2;
-
-            // Sometimes there are multiple statements for the end `}` line.
-            // When this happens, do not hide brackets
-            if non_empty_body {
-                let len = statements.len();
-                if statements[len - 2].line_start == statements[len - 1].line_start {
-                    non_empty_body = false;
-                }
-
-                if statements[0].line_start == statements[1].line_start {
-                    non_empty_body = false;
-                }
-            }
-
             let mut next_line = proc_start;
             for i in 0..statements.len() {
                 let Statement {
@@ -883,22 +868,14 @@ impl<'a> Function<'a> {
                 let diff_start = print_rva_diff_start(diff_start);
                 let diff_next = print_rva_diff_next(diff_next);
 
-                let suffix = if i == 0 {
-                    "\t{"
-                } else if i == statements.len() - 1 {
-                    "\t}"
-                } else {
-                    ""
-                };
-
-                if !suffix.is_empty() && non_empty_body {
+                if i == 0 || i == statements.len() - 1 {
                     continue;
-                }
+                };
 
                 #[rustfmt::skip]
                 match depth {
-                    0  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}:'{line_start}'{suffix}"),
-                    _  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}|[{depth}]:'{line_start}'{suffix}"),
+                    0  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}:'{line_start}'"),
+                    _  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}|[{depth}]:'{line_start}'"),
                 }?;
             }
 

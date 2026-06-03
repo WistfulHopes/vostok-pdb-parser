@@ -18,8 +18,13 @@ pub fn render_listing(f: &FunctionEntry) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}:", f.name);
 
-    let stmt_at: HashMap<u32, &crate::rich_context::Statement> =
-        f.statements.iter().map(|s| (s.off, s)).collect();
+    // Body-less functions carry only the synthetic frame-brace statements; don't
+    // annotate the disassembly with them (keeps base/target listings identical).
+    let stmt_at: HashMap<u32, &crate::rich_context::Statement> = if f.is_body_less() {
+        HashMap::new()
+    } else {
+        f.statements.iter().map(|s| (s.off, s)).collect()
+    };
 
     for insn in &f.instructions {
         if let Some(label) = &insn.label {
@@ -58,6 +63,15 @@ pub fn render_info(f: &FunctionEntry) -> String {
 /// cheap structural signal a matcher can compare before generating code.
 pub fn render_structure(f: &FunctionEntry) -> String {
     let mut out = String::new();
+
+    // Body-less functions (empty `{}`) carry only the synthetic frame braces,
+    // which the two PDBs encode as a different statement count (base 2 vs target
+    // 1). Normalize both to an empty body: header line only, zero statement rows.
+    if f.is_body_less() {
+        let _ = writeln!(out, "{}: ; 0 statements, 0x{:x} bytes", f.name, f.size);
+        return out;
+    }
+
     let _ = writeln!(
         out,
         "{}: ; {} statements, 0x{:x} bytes",
