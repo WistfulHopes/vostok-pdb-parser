@@ -832,19 +832,6 @@ impl<'a> Function<'a> {
                 Some(loc) => writeln!(w, "\t// FUNCTION BODY[{offset}]: {loc}")?,
             }
 
-            // Body-less function (empty `{}`): the only statements are the frame
-            // braces (open `{` + close `}`), with no body statement between them.
-            // With <= 2 statements there is no room for a real body statement, so
-            // we render an empty FUNCTION BODY — header only, no `{`/`}`/rows.
-            // This matches the target carcass (a single decl-line skeleton) and
-            // removes the confusing base-2-vs-target-1 statement mismatch.
-            if statements.len() <= 2 {
-                writeln!(w, "\t// ******")?;
-                writeln!(w, "}}")?;
-                writeln!(w)?;
-                return Ok(());
-            }
-
             let rva_diff = |lhs: pdb::Rva, rhs: pdb::Rva| -> i32 { lhs.0 as i32 - rhs.0 as i32 };
             let print_rva_diff_start = |diff: i32| match diff >= 0 {
                 true => format!("0x{diff:03x}"),
@@ -857,21 +844,6 @@ impl<'a> Function<'a> {
                     false => format!("-0x{diff:03x}", diff = diff.abs()),
                 },
             };
-
-            let mut non_empty_body = statements.len() > 2;
-
-            // Sometimes there are multiple statements for the end `}` line.
-            // When this happens, do not hide brackets
-            if non_empty_body {
-                let len = statements.len();
-                if statements[len - 2].line_start == statements[len - 1].line_start {
-                    non_empty_body = false;
-                }
-
-                if statements[0].line_start == statements[1].line_start {
-                    non_empty_body = false;
-                }
-            }
 
             let mut next_line = proc_start;
             for i in 0..statements.len() {
@@ -896,22 +868,14 @@ impl<'a> Function<'a> {
                 let diff_start = print_rva_diff_start(diff_start);
                 let diff_next = print_rva_diff_next(diff_next);
 
-                let suffix = if i == 0 {
-                    "\t{"
-                } else if i == statements.len() - 1 {
-                    "\t}"
-                } else {
-                    ""
-                };
-
-                if !suffix.is_empty() && non_empty_body {
+                if i == 0 || i == statements.len() - 1 {
                     continue;
-                }
+                };
 
                 #[rustfmt::skip]
                 match depth {
-                    0  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}:'{line_start}'{suffix}"),
-                    _  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}|[{depth}]:'{line_start}'{suffix}"),
+                    0  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}:'{line_start}'"),
+                    _  => writeln!(w, "\t// <{offset}>|{diff_start}|{diff_next}|[{depth}]:'{line_start}'"),
                 }?;
             }
 
