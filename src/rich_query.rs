@@ -17,6 +17,10 @@ pub struct Query<'a> {
     pub name: Option<&'a str>,
     /// Exact function RVA (image-relative).
     pub rva: Option<u32>,
+    /// Exact decorated (mangled) COFF symbol. Identical across the two PDBs for
+    /// the same function, so it is the precise base↔target join key — unlike the
+    /// demangled `name`, which can differ (e.g. `const` on by-value params).
+    pub mangled: Option<&'a str>,
 }
 
 /// Stream `index.jsonl`, returning entries that match `query`, sorted by
@@ -36,6 +40,9 @@ pub fn search(index_path: &Path, query: &Query) -> crate::Result<Vec<FunctionEnt
         let entry: FunctionEntry = serde_json::from_str(&line)?;
 
         if query.rva.is_some_and(|rva| entry.rva != rva) {
+            continue;
+        }
+        if query.mangled.is_some_and(|m| entry.mangled != m) {
             continue;
         }
         if let Some(needle) = &needle {

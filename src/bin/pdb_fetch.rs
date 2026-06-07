@@ -63,6 +63,12 @@ struct Cli {
     #[arg(long, value_delimiter = ',')]
     view: Vec<String>,
 
+    /// Only meaningful with `--view structure-diff`: collapse maximal runs of
+    /// aligned-equal rows to a single `.. same ..` line and show only the
+    /// divergences (size + quantity diffs).
+    #[arg(long)]
+    condensed: bool,
+
     /// Delinker base `.obj` dir (e.g. binaries/objdiff/base). With its target
     /// counterpart, `--view diff` uses the operand-aware objdiff-core backend.
     #[arg(long, value_hint = clap::ValueHint::DirPath)]
@@ -95,6 +101,55 @@ fn first_match(index: &Path, query: &Query) -> Result<Option<FunctionEntry>, Str
     Ok(hits.drain(..).next())
 }
 
+/// Resolve the entry in `index` whose identity equals `target`'s, preferring the
+/// `mangled` symbol (identical across the two PDBs per FunctionEntry docs) and
+/// falling back to an exact demangled-`name` match. The target rva is NOT used —
+/// the base rva differs for the same function. Returns the (sole) match, `None`
+/// when nothing matches, or `Err(_)` when the name is ambiguous (an overload set
+/// the mangled symbol failed to disambiguate).
+fn resolve_by_identity(
+    index: &Path,
+    target: &FunctionEntry,
+) -> Result<Option<FunctionEntry>, String> {
+    // The shared mangled symbol is the precise key; match it first. (The demangled
+    // name can differ across the two PDBs — e.g. `const` on by-value params — so we
+    // cannot pre-filter by name here.)
+    let mut by_mangled = search(
+        index,
+        &Query {
+            mangled: Some(&target.mangled),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    if !by_mangled.is_empty() {
+        return Ok(by_mangled.drain(..).next());
+    }
+
+    // Fall back to an exact demangled-name match (handles entries whose mangled
+    // form differs but signature is identical).
+    let mut by_name: Vec<FunctionEntry> = search(
+        index,
+        &Query {
+            name: Some(&target.name),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| e.to_string())?
+    .into_iter()
+    .filter(|e| e.name == target.name)
+    .collect();
+    match by_name.len() {
+        0 => Ok(None),
+        1 => Ok(by_name.drain(..).next()),
+        n => Err(format!(
+            "structure-diff: function '{}' is ambiguous in the base index ({n} entries, \
+             mangled '{}' did not disambiguate); pass --rva for the target side",
+            target.name, target.mangled
+        )),
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -110,27 +165,39 @@ fn main() {
     let query = Query {
         name: cli.function.as_deref(),
         rva: cli.rva,
+        ..Default::default()
     };
 
+    // Resolve the TARGET side first, by name (narrowed by --rva), exactly the way
+    // the diff/structure views select their entry.
     let target = match cli.target_index.as_deref().map(|p| first_match(p, &query)) {
         Some(Ok(t)) => t,
         Some(Err(e)) => fail(&e),
         None => None,
     };
-    // Join base to the resolved target by exact name when we have one, so the two
-    // sides are the same function even if the selector was a loose substring.
+    // Resolve the BASE side INDEPENDENTLY. When we have a target, join by the
+    // target's identity (mangled symbol, then exact name) — never by the target's
+    // rva, which differs across the two PDBs. With no target (base-only run), fall
+    // back to the raw selector.
     let base = match cli.base_index.as_deref() {
         None => None,
-        Some(p) => {
-            let q = match &target {
-                Some(t) => Query { name: Some(&t.name), rva: None },
-                None => Query { name: cli.function.as_deref(), rva: cli.rva },
-            };
-            match first_match(p, &q) {
+        Some(p) => match &target {
+            Some(t) => match resolve_by_identity(p, t) {
                 Ok(b) => b,
                 Err(e) => fail(&e),
+            },
+            None => {
+                let q = Query {
+                    name: cli.function.as_deref(),
+                    rva: cli.rva,
+                    ..Default::default()
+                };
+                match first_match(p, &q) {
+                    Ok(b) => b,
+                    Err(e) => fail(&e),
+                }
             }
-        }
+        },
     };
 
     if target.is_none() && base.is_none() {
@@ -190,9 +257,30 @@ fn main() {
                 _ => eprintln!("(--view diff needs both --base-index and --target-index)"),
             },
             "structure-diff" => match (&base, &target) {
-                (Some(b), Some(t)) => print!("{}", render_structure_diff(b, t)),
+                (Some(b), Some(t)) => {
+                    print!("{}", render_structure_diff(b, t, cli.condensed))
+                }
                 _ => {
-                    eprintln!("(--view structure-diff needs both --base-index and --target-index)")
+                    // Distinguish a genuinely absent index flag (keep the original
+                    // message) from a side that failed to RESOLVE though its flag
+                    // was passed (precise, names which side and why).
+                    if cli.target_index.is_none() || cli.base_index.is_none() {
+                        eprintln!(
+                            "(--view structure-diff needs both --base-index and --target-index)"
+                        );
+                    } else if target.is_none() {
+                        eprintln!(
+                            "structure-diff: function {} not found in TARGET index \
+                             (overload? wrong name? pass --rva to pin it)",
+                            describe_selector(&cli)
+                        );
+                    } else {
+                        eprintln!(
+                            "structure-diff: function '{}' not found in BASE index \
+                             (is it built? overload? pass --rva for the target side)",
+                            target.as_ref().map(|t| t.name.as_str()).unwrap_or("?")
+                        );
+                    }
                 }
             },
             other => {
@@ -225,6 +313,16 @@ fn print_diff(cli: &Cli, base: &FunctionEntry, target: &FunctionEntry) {
 
     let d = rich_diff::diff(base, target);
     print!("{}", rich_diff::render_unified(base, target, &d));
+}
+
+/// Human-readable rendering of the function selector, for error messages.
+fn describe_selector(cli: &Cli) -> String {
+    match (&cli.function, cli.rva) {
+        (Some(n), Some(rva)) => format!("'{n}' (rva 0x{rva:x})"),
+        (Some(n), None) => format!("'{n}'"),
+        (None, Some(rva)) => format!("rva 0x{rva:x}"),
+        (None, None) => "<none>".to_string(),
+    }
 }
 
 fn fail(msg: &str) -> ! {

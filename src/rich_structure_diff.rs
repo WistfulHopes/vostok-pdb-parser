@@ -331,8 +331,16 @@ fn row_size(r: &Row) -> u32 {
 
 /// Render the full side-by-side structure diff. Target is the left column (to
 /// match the `target:` / `base:` header order); each divergence carries a
-/// trailing tag.
-pub fn render_structure_diff(base: &FunctionEntry, target: &FunctionEntry) -> String {
+/// trailing tag. When `condensed`, collapse aligned-equal runs to `.. same ..`
+/// and emit only the divergence rows in a compact one-line form.
+pub fn render_structure_diff(
+    base: &FunctionEntry,
+    target: &FunctionEntry,
+    condensed: bool,
+) -> String {
+    if condensed {
+        return render_condensed(base, target);
+    }
     let base_rows = structure_rows(base);
     let target_rows = structure_rows(target);
     let rows = diff_structure(&base_rows, &target_rows);
@@ -431,6 +439,137 @@ pub fn render_structure_diff(base: &FunctionEntry, target: &FunctionEntry) -> St
 
         let _ = writeln!(out, "{target_cell:<width$}    {base_cell}{tag}");
     }
+
+    let _ = writeln!(
+        out,
+        "; aligned {aligned}, size-diffs {size_diffs}, quantity-diffs {quantity_diffs}"
+    );
+    out
+}
+
+/// Compact per-side `0x{off:03x} <0x{size:x}>` cell for the condensed view; an
+/// absent side (and an Empty, which has no real offset) renders as a padded `--`.
+fn compact_cell(r: Option<&Row>) -> String {
+    match r {
+        Some(Row::Stmt { off, size, .. }) => format!("0x{off:03x} <0x{size:x}>"),
+        _ => format!("{:<11}", "--"),
+    }
+}
+
+/// The source-statement text for a divergence row: the base `source` when
+/// present, else `L{line}` from whichever side carries a statement.
+fn stmt_text(base: Option<&Row>, target: Option<&Row>) -> String {
+    if let Some(Row::Stmt {
+        source: Some(src), ..
+    }) = base
+    {
+        return (*src).to_string();
+    }
+    for r in [base, target].into_iter().flatten() {
+        if let Row::Stmt { line, .. } = r {
+            return format!("L{line}");
+        }
+    }
+    String::new()
+}
+
+/// Condensed structure diff: header + summary unchanged, equal runs collapsed to
+/// a single `.. same ..`, and only the divergence rows emitted in compact form.
+/// After the first size divergence the per-side offsets DRIFT apart (they
+/// accumulate the size delta) — that is expected; we keep showing raw per-side
+/// offsets without re-anchoring.
+fn render_condensed(base: &FunctionEntry, target: &FunctionEntry) -> String {
+    let base_rows = structure_rows(base);
+    let target_rows = structure_rows(target);
+    let rows = diff_structure(&base_rows, &target_rows);
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "target: 0x{:x}            base: 0x{:x}",
+        target.rva, base.rva
+    );
+    let _ = writeln!(
+        out,
+        "; {} ; target {} stmts / base {} stmts",
+        target.name,
+        target_rows.len(),
+        base_rows.len()
+    );
+
+    let (mut aligned, mut size_diffs, mut quantity_diffs) = (0usize, 0usize, 0usize);
+    // Collapse a maximal run of aligned-equal rows into one `.. same ..` marker.
+    let mut pending_same = false;
+    let flush_same = |out: &mut String, pending: &mut bool| {
+        if *pending {
+            let _ = writeln!(out, ".. same ..");
+            *pending = false;
+        }
+    };
+
+    for r in &rows {
+        match r {
+            StructRow::Equal { .. } | StructRow::EmptyEqual => {
+                aligned += 1;
+                pending_same = true;
+                continue;
+            }
+            StructRow::Changed { base, target } => {
+                size_diffs += 1;
+                flush_same(&mut out, &mut pending_same);
+                let _ = writeln!(
+                    out,
+                    "{} | {} | {}   SIZE",
+                    compact_cell(Some(target)),
+                    compact_cell(Some(base)),
+                    stmt_text(Some(base), Some(target)),
+                );
+            }
+            StructRow::OnlyBase { stmt } => {
+                quantity_diffs += 1;
+                flush_same(&mut out, &mut pending_same);
+                let _ = writeln!(
+                    out,
+                    "{} | {} | {}   ONLY base",
+                    compact_cell(None),
+                    compact_cell(Some(stmt)),
+                    stmt_text(Some(stmt), None),
+                );
+            }
+            StructRow::OnlyTarget { stmt } => {
+                quantity_diffs += 1;
+                flush_same(&mut out, &mut pending_same);
+                let _ = writeln!(
+                    out,
+                    "{} | {} | {}   ONLY target",
+                    compact_cell(Some(stmt)),
+                    compact_cell(None),
+                    stmt_text(None, Some(stmt)),
+                );
+            }
+            StructRow::EmptyOnlyBase => {
+                quantity_diffs += 1;
+                flush_same(&mut out, &mut pending_same);
+                let _ = writeln!(
+                    out,
+                    "{} | {} |    EMPTY only base",
+                    compact_cell(None),
+                    compact_cell(None),
+                );
+            }
+            StructRow::EmptyOnlyTarget => {
+                quantity_diffs += 1;
+                flush_same(&mut out, &mut pending_same);
+                let _ = writeln!(
+                    out,
+                    "{} | {} |    EMPTY only target",
+                    compact_cell(None),
+                    compact_cell(None),
+                );
+            }
+        }
+    }
+    flush_same(&mut out, &mut pending_same);
 
     let _ = writeln!(
         out,

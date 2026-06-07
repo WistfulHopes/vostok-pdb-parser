@@ -49,6 +49,7 @@ fn main() {
     let query = Query {
         name: cli.function.as_deref(),
         rva: cli.rva,
+        ..Default::default()
     };
 
     let hits = match search(&cli.index, &query) {
