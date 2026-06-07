@@ -77,6 +77,16 @@ pub fn structure_rows(f: &FunctionEntry) -> Vec<Row<'_>> {
         }
     }
 
+    // Empty rows at the very start or end are just blank-line/comment/#ifdef gaps at the
+    // function's top or bottom - not structural signal. Trim them so the diff begins and
+    // ends on a real statement (and we don't emit boundary `EMPTY only ...` rows).
+    while matches!(rows.first(), Some(Row::Empty)) {
+        rows.remove(0);
+    }
+    while matches!(rows.last(), Some(Row::Empty)) {
+        rows.pop();
+    }
+
     rows
 }
 
