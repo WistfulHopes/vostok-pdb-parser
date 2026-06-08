@@ -496,6 +496,19 @@ fn render_condensed(base: &FunctionEntry, target: &FunctionEntry) -> String {
     let target_rows = structure_rows(target);
     let rows = diff_structure(&base_rows, &target_rows);
 
+    // Count only REAL statements (`Row::Stmt`) for the header. Blank-line gaps
+    // (`Row::Empty`) are not statements; counting them makes an empty-line-only
+    // attribution look like a lost/gained statement (the "target N / base N-1"
+    // confusion). Real-statement totals are equal whenever no real stmt diverges.
+    let target_stmts = target_rows
+        .iter()
+        .filter(|r| matches!(r, Row::Stmt { .. }))
+        .count();
+    let base_stmts = base_rows
+        .iter()
+        .filter(|r| matches!(r, Row::Stmt { .. }))
+        .count();
+
     let mut out = String::new();
     let _ = writeln!(
         out,
@@ -505,12 +518,17 @@ fn render_condensed(base: &FunctionEntry, target: &FunctionEntry) -> String {
     let _ = writeln!(
         out,
         "; {} ; target {} stmts / base {} stmts",
-        target.name,
-        target_rows.len(),
-        base_rows.len()
+        target.name, target_stmts, base_stmts
     );
 
-    let (mut aligned, mut size_diffs, mut quantity_diffs) = (0usize, 0usize, 0usize);
+    let (mut aligned, mut size_diffs, mut quantity_diffs, mut blank_gaps) =
+        (0usize, 0usize, 0usize, 0usize);
+    // Monotonic REAL-statement row index (1-based), printed as an `NN:` prefix so
+    // each divergence row is locatable and a collapsed `.. same ..` run is bracketed
+    // by the index it resumes at. One shared counter (not per-side) so it never
+    // repeats or goes backwards at an ONLY base/target divergence. Blank rows do not
+    // advance it.
+    let mut n = 0usize;
     // Collapse a maximal run of aligned-equal rows into one `.. same ..` marker.
     let mut pending_same = false;
     let flush_same = |out: &mut String, pending: &mut bool| {
@@ -522,63 +540,60 @@ fn render_condensed(base: &FunctionEntry, target: &FunctionEntry) -> String {
 
     for r in &rows {
         match r {
-            StructRow::Equal { .. } | StructRow::EmptyEqual => {
+            StructRow::Equal { .. } => {
                 aligned += 1;
+                n += 1;
+                pending_same = true;
+                continue;
+            }
+            // Blank line on both sides: part of the aligned run, not a statement.
+            StructRow::EmptyEqual => {
                 pending_same = true;
                 continue;
             }
             StructRow::Changed { base, target } => {
+                n += 1;
                 size_diffs += 1;
                 flush_same(&mut out, &mut pending_same);
                 let _ = writeln!(
                     out,
-                    "{} | {} | {}   SIZE",
+                    "{:>3}: {} | {} | {}   SIZE",
+                                        n,
                     compact_cell(Some(target)),
                     compact_cell(Some(base)),
                     stmt_text(Some(base), Some(target)),
                 );
             }
             StructRow::OnlyBase { stmt } => {
+                n += 1;
                 quantity_diffs += 1;
                 flush_same(&mut out, &mut pending_same);
                 let _ = writeln!(
                     out,
-                    "{} | {} | {}   ONLY base",
+                    "{:>3}: {} | {} | {}   ONLY base",
+                    n,
                     compact_cell(None),
                     compact_cell(Some(stmt)),
                     stmt_text(Some(stmt), None),
                 );
             }
             StructRow::OnlyTarget { stmt } => {
+                n += 1;
                 quantity_diffs += 1;
                 flush_same(&mut out, &mut pending_same);
                 let _ = writeln!(
                     out,
-                    "{} | {} | {}   ONLY target",
+                    "{:>3}: {} | {} | {}   ONLY target",
+                    n,
                     compact_cell(Some(stmt)),
                     compact_cell(None),
                     stmt_text(None, Some(stmt)),
                 );
             }
-            StructRow::EmptyOnlyBase => {
-                quantity_diffs += 1;
-                flush_same(&mut out, &mut pending_same);
-                let _ = writeln!(
-                    out,
-                    "{} | {} |    EMPTY only base",
-                    compact_cell(None),
-                    compact_cell(Some(&Row::Empty)),
-                );
-            }
-            StructRow::EmptyOnlyTarget => {
-                quantity_diffs += 1;
-                flush_same(&mut out, &mut pending_same);
-                let _ = writeln!(
-                    out,
-                    "{} | {} |    EMPTY only target",
-                    compact_cell(Some(&Row::Empty)),
-                    compact_cell(None),
-                );
+            // Blank-line-only attribution gap: NOT a real divergence. Suppress the
+            // row (it was pure noise); tally it as a `blank-gaps` for transparency.
+            StructRow::EmptyOnlyBase | StructRow::EmptyOnlyTarget => {
+                blank_gaps += 1;
             }
         }
     }
@@ -586,7 +601,7 @@ fn render_condensed(base: &FunctionEntry, target: &FunctionEntry) -> String {
 
     let _ = writeln!(
         out,
-        "; aligned {aligned}, size-diffs {size_diffs}, quantity-diffs {quantity_diffs}"
+        "; aligned {aligned}, size-diffs {size_diffs}, quantity-diffs {quantity_diffs}, blank-gaps {blank_gaps}"
     );
     out
 }
