@@ -104,6 +104,10 @@ pub struct FunctionEntry {
     pub mangled: String,
     /// Function RVA (image-relative) — the merge key shared with the line program.
     pub rva: u32,
+    /// PE image base (from the EXE optional header). Stored per-entry so renderers
+    /// derive absolute VAs (`image_base + rva + off`) without a hardcoded constant.
+    #[serde(default)]
+    pub image_base: u32,
     /// Function length in bytes.
     pub size: u32,
     /// Source file, `/`-separated (engine-relative in tree mode).
@@ -409,6 +413,7 @@ fn build_function(
         name: signature,
         mangled,
         rva: func_rva as u32,
+        image_base: image_base as u32,
         size: size as u32,
         file,
         statements,

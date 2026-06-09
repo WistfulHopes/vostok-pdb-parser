@@ -78,22 +78,67 @@ pub fn render_structure(f: &FunctionEntry) -> String {
     // `gen_sources` and the structure-diff use). Show only those body statements,
     // and the locals, so this view matches the carcass's `// FUNCTION BODY` +
     // `// LOCALS` (each declared local is its own statement under /Od).
-    let body = &f.statements[1..f.statements.len() - 1];
-    let _ = writeln!(
-        out,
-        "{}: ; {} statements, 0x{:x} bytes",
-        f.name,
-        body.len(),
-        f.size
-    );
+    let n = f.statements.len();
+    let _ = writeln!(out, "{}: ; {} statements, 0x{:x} bytes", f.name, n - 2, f.size);
     render_locals_into(&mut out, f);
-    for s in body {
-        match &s.source {
-            Some(src) => {
-                let _ = writeln!(out, "0x{:02x}  <0x{:x}>  {src}", s.off, s.size);
+
+    // Body rows (strictly between the synthetic frame braces): absolute VA, function
+    // offset, signed byte-size to the next statement (the closing `}` for the last
+    // row; negative when the next statement sits at a lower address) and source line
+    // (+ source text on base). VA is derived from the entry's own image base.
+    struct Row {
+        va: u32,
+        off: u32,
+        delta: i64,
+        line: u32,
+        src: Option<String>,
+    }
+    let rows: Vec<Row> = (1..n - 1)
+        .map(|i| {
+            let s = &f.statements[i];
+            Row {
+                va: f.image_base.wrapping_add(f.rva).wrapping_add(s.off),
+                off: s.off,
+                delta: f.statements[i + 1].off as i64 - s.off as i64,
+                line: s.line,
+                src: s.source.clone(),
+            }
+        })
+        .collect();
+
+    // Hex-digit width per column: the widest value present, but never narrower than
+    // what the header label needs (label minus its `0x`/`+0x` prefix). Zero-padding
+    // to this width keeps the `0x006`/`+0x00b` look yet grows cleanly when the VA,
+    // offset or size get larger - nothing is ever a hardcoded width.
+    let hexw = |vals: &mut dyn Iterator<Item = u64>, min: usize| {
+        vals.map(|v| format!("{:x}", v).len()).max().unwrap_or(1).max(min)
+    };
+    let da = hexw(&mut rows.iter().map(|r| r.va as u64), "address".len() - 2);
+    let dofs = hexw(&mut rows.iter().map(|r| r.off as u64), "offst".len() - 2);
+    let dd = hexw(&mut rows.iter().map(|r| r.delta.unsigned_abs()), "size".len() - 3);
+    // Column widths follow from the prefixes: `0x`+da, `0x`+dofs, sign+`0x`+dd.
+    let (wa, wo, ws) = (2 + da, 2 + dofs, 3 + dd);
+    let wl = rows.iter().map(|r| format!("{}", r.line).len()).max().unwrap_or(0).max("line".len());
+
+    let _ = writeln!(out, "{:<wa$}|{:<wo$}|{:^ws$}|{:<wl$}", "address", "offst", "size", "line");
+    let _ = writeln!(out, "{}+{}+{}+{}", "-".repeat(wa), "-".repeat(wo), "-".repeat(ws), "-".repeat(wl));
+    for r in &rows {
+        let sign = if r.delta < 0 { "-" } else { "+" };
+        let _ = write!(
+            out,
+            "0x{:0da$x}|0x{:0dofs$x}|{sign}0x{:0dd$x}|",
+            r.va,
+            r.off,
+            r.delta.unsigned_abs(),
+        );
+        // Pad `line` only when source text trails it (base), so target rows carry no
+        // trailing whitespace.
+        match &r.src {
+            Some(s) => {
+                let _ = writeln!(out, "{:<wl$}\t{s}", r.line);
             }
             None => {
-                let _ = writeln!(out, "0x{:02x}  <0x{:x}>  L{}", s.off, s.size, s.line);
+                let _ = writeln!(out, "{}", r.line);
             }
         }
     }
