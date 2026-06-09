@@ -372,12 +372,12 @@ fn describe_selector(cli: &Cli) -> String {
     }
 }
 
-/// Audit log: when `$PDB_FETCH_LOG` is set, append one tab-separated line per
-/// invocation - `<timestamp>  <elapsed>ms  <git-branch>  <all flags>` - so the
-/// agent's tool usage (which view, which function/address, from which worktree,
-/// when) is reviewable. Logs on Drop, so it fires for any normal completion.
+/// Audit log: append one tab-separated line per invocation -
+/// `<timestamp>  <git-branch>  <all flags>` - so the agent's tool usage (which
+/// view, which function/address, from which worktree, when) is reviewable. These
+/// reads are fast, so execution time is not recorded. Logs on Drop, so it fires
+/// for any normal completion.
 struct LogGuard {
-    start: std::time::Instant,
     when: chrono::DateTime<chrono::Local>,
     path: Option<PathBuf>,
 }
@@ -385,7 +385,6 @@ struct LogGuard {
 impl LogGuard {
     fn start(path: Option<PathBuf>) -> Self {
         Self {
-            start: std::time::Instant::now(),
             when: chrono::Local::now(),
             path,
         }
@@ -397,11 +396,12 @@ impl Drop for LogGuard {
         let Some(path) = &self.path else {
             return;
         };
+        use chrono::Timelike as _;
         let args: Vec<String> = std::env::args().skip(1).collect();
         let line = format!(
-            "{}\t{}ms\t{}\t{}\n",
-            self.when.format("%Y-%m-%d %H:%M:%S%.3f"),
-            self.start.elapsed().as_millis(),
+            "[{}.{:02}][{}]: {}\n",
+            self.when.format("%Y-%m-%d %H:%M:%S"),
+            self.when.nanosecond() / 10_000_000,
             current_branch(),
             args.join(" "),
         );
