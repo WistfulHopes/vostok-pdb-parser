@@ -27,21 +27,23 @@ pub fn render_listing(f: &FunctionEntry) -> String {
     };
 
     for insn in &f.instructions {
-        if let Some(label) = &insn.label {
-            let _ = writeln!(out, "{label}:");
-        }
-        let _ = write!(out, "0x{:02x}:    {}", insn.off, insn.text);
+        // The statement heads its instruction group on its OWN line, labelled by
+        // the statement's offset `[0xNN]:` (distinct from the `0xNN:` instruction
+        // lines), with the source text on base.
         if let Some(stmt) = stmt_at.get(&insn.off) {
             match &stmt.source {
                 Some(src) => {
-                    let _ = write!(out, "\t; <0x{:x}> ; {src}", stmt.size);
+                    let _ = writeln!(out, "[0x{:02x}]: {src}", insn.off);
                 }
                 None => {
-                    let _ = write!(out, "\t; <0x{:x}>", stmt.size);
+                    let _ = writeln!(out, "[0x{:02x}]:", insn.off);
                 }
             }
         }
-        let _ = writeln!(out);
+        if let Some(label) = &insn.label {
+            let _ = writeln!(out, "{label}:");
+        }
+        let _ = writeln!(out, "0x{:02x}:    {}", insn.off, insn.text);
     }
     out
 }
@@ -64,27 +66,23 @@ pub fn render_listing_statement(f: &FunctionEntry, n: usize) -> String {
     let stmt = &f.statements[n];
     let (lo, hi) = (stmt.off, stmt.off + stmt.size);
     let va = f.image_base.wrapping_add(f.rva).wrapping_add(lo);
-    let _ = writeln!(out, "; 0x{:x} stmt #{} <0x{:x}> line {}", va, n, stmt.size, stmt.line);
+    let _ = writeln!(out, "; 0x{:x} stmt #{} line {}", va, n, stmt.line);
     let _ = writeln!(out, "{}", f.name);
+    // The statement heads its instructions on its own line `[0xNN]:`, like the
+    // full listing; the source text follows on base.
+    match &stmt.source {
+        Some(src) => {
+            let _ = writeln!(out, "[0x{:02x}]: {src}", lo);
+        }
+        None => {
+            let _ = writeln!(out, "[0x{:02x}]:", lo);
+        }
+    }
     for insn in f.instructions.iter().filter(|i| i.off >= lo && i.off < hi) {
         if let Some(label) = &insn.label {
             let _ = writeln!(out, "{label}:");
         }
-        let _ = write!(out, "0x{:02x}:    {}", insn.off, insn.text);
-        // Carry the statement annotation (size + matched source) on the anchor
-        // instruction, exactly like the full listing - so the matched line stays
-        // in the output even when sliced to one statement.
-        if insn.off == lo {
-            match &stmt.source {
-                Some(src) => {
-                    let _ = write!(out, "\t; <0x{:x}> ; {src}", stmt.size);
-                }
-                None => {
-                    let _ = write!(out, "\t; <0x{:x}>", stmt.size);
-                }
-            }
-        }
-        let _ = writeln!(out);
+        let _ = writeln!(out, "0x{:02x}:    {}", insn.off, insn.text);
     }
     out
 }
