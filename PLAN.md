@@ -170,7 +170,7 @@ humans. Batched matching will need many diffs against target in one pass.
 | `structure` | either | statement skeleton: offset, `<size>`, line/source, no asm |
 | `diff` | both | aligned base↔target instruction diff + match ratio; the objdiff backend interleaves base source/offsets onto the rows |
 | `callees` | function's side | the function's `call` targets, each resolved to its index signature(s) |
-| `info` | function's side | PDB-recorded locals (`type name`); approximate under LTO |
+| `info` | function's side | PDB-recorded locals (`type name`) |
 
 Planned views: call-site metadata for *indirect* calls (the carcass `CALL SITE
 INFO`); optionally `callees` with full bodies, not just signatures.

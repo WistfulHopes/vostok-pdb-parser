@@ -87,12 +87,12 @@ pub fn render_listing_statement(f: &FunctionEntry, n: usize) -> String {
     out
 }
 
-/// Function info: the PDB-recorded locals (`type  name`). Approximate under LTO
-/// — some are optimized out and register locals may overlap arguments.
+/// Function info: the PDB-recorded locals (`type  name`). Exact in the
+/// non-optimized parts of the build.
 pub fn render_info(f: &FunctionEntry) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}:", f.name);
-    let _ = writeln!(out, "; locals ({}) — PDB-recorded, approximate under LTO", f.locals.len());
+    let _ = writeln!(out, "; locals ({}) — PDB-recorded", f.locals.len());
     for l in &f.locals {
         let _ = writeln!(out, "  {}\t{}", l.ty, l.name);
     }
@@ -238,8 +238,7 @@ pub fn render_structure(f: &FunctionEntry) -> String {
 }
 
 /// Append the PDB-recorded locals as `; locals (N):` then `;   <type>\t<name>`
-/// rows (nothing when there are none). Approximate under LTO - some are optimized
-/// out and register locals may overlap arguments.
+/// rows (nothing when there are none).
 fn render_locals_into(out: &mut String, f: &FunctionEntry) {
     if f.locals.is_empty() {
         return;

@@ -69,8 +69,8 @@ pub struct Instruction {
     pub label: Option<String>,
 }
 
-/// A PDB-recorded local variable (name + type). Approximate under LTO — some are
-/// optimized out, and register locals may be indistinguishable from arguments.
+/// A PDB-recorded local variable (name + type). Exact in the non-optimized
+/// parts of the build.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Local {
     pub name: String,
@@ -132,7 +132,7 @@ pub struct FunctionEntry {
     pub statements: Vec<Statement>,
     /// Instructions, in address order.
     pub instructions: Vec<Instruction>,
-    /// PDB-recorded local variables (approximate under LTO).
+    /// PDB-recorded local variables.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub locals: Vec<Local>,
     /// `{}` blocks that open at an RVA with no line-program statement (so they

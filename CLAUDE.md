@@ -20,7 +20,7 @@ that produced it, and serves that on demand as different *views*:
 | `structure` | either | statement skeleton: offset, byte size, source/line — no asm |
 | `diff` | both | base↔target aligned instruction diff + a match % |
 | `callees` | one side | the function's `call` targets, resolved to full signatures |
-| `info` | one side | PDB-recorded locals (`type name`) — approximate under LTO |
+| `info` | one side | PDB-recorded locals (`type name`) |
 
 The whole point: feed the model **structured, comparable context** (sizes,
 alignment, source mapping) instead of a screenshot of objdiff.
@@ -249,14 +249,13 @@ pdb_fetch --target-index out/target/index.jsonl --rva 0x573750 --view info
 ```
 ```
 bool vostok::physics::bt_ghost_object::contact_test(vostok::physics::world*):
-; locals (3) — PDB-recorded, approximate under LTO
+; locals (3) — PDB-recorded
   const s32	pairs_count
   s32	i
   btAlignedObjectArray<btPersistentManifold *>	manifold_results
 ```
 
-Approximate: under LTO some locals are optimized out and register locals can
-overlap arguments.
+The locals are exact in the non-optimized parts of the build.
 
 ---
 
