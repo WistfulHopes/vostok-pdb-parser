@@ -69,17 +69,25 @@ pub fn render_structure(f: &FunctionEntry) -> String {
     // every form to an empty body: header line only, zero statement rows.
     if f.is_body_less() {
         let _ = writeln!(out, "{}: ; 0 statements, 0x{:x} bytes", f.name, f.size);
+        render_locals_into(&mut out, f);
         return out;
     }
 
+    // The FIRST and LAST statements are the synthetic frame braces (`{` and `}`);
+    // the real body is strictly between them (the same skip-first-last rule that
+    // `gen_sources` and the structure-diff use). Show only those body statements,
+    // and the locals, so this view matches the carcass's `// FUNCTION BODY` +
+    // `// LOCALS` (each declared local is its own statement under /Od).
+    let body = &f.statements[1..f.statements.len() - 1];
     let _ = writeln!(
         out,
         "{}: ; {} statements, 0x{:x} bytes",
         f.name,
-        f.statements.len(),
+        body.len(),
         f.size
     );
-    for s in &f.statements {
+    render_locals_into(&mut out, f);
+    for s in body {
         match &s.source {
             Some(src) => {
                 let _ = writeln!(out, "0x{:02x}  <0x{:x}>  {src}", s.off, s.size);
@@ -90,4 +98,17 @@ pub fn render_structure(f: &FunctionEntry) -> String {
         }
     }
     out
+}
+
+/// Append the PDB-recorded locals as `; locals (N):` then `;   <type>\t<name>`
+/// rows (nothing when there are none). Approximate under LTO - some are optimized
+/// out and register locals may overlap arguments.
+fn render_locals_into(out: &mut String, f: &FunctionEntry) {
+    if f.locals.is_empty() {
+        return;
+    }
+    let _ = writeln!(out, "; locals ({}):", f.locals.len());
+    for l in &f.locals {
+        let _ = writeln!(out, ";   {}\t{}", l.ty, l.name);
+    }
 }
