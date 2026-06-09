@@ -496,10 +496,11 @@ fn push_local(
 /// Strip a trailing carcass annotation comment (`// <0x...>|...:'NNN'`) that the
 /// vostok carcass stubs embed inline in source lines, leaving just the code.
 /// Only the angle-bracket address marker `// <` is matched, so ordinary `//`
-/// comments are untouched.
+/// comments are untouched. Only the TRAILING whitespace (the padding before the
+/// comment) is trimmed - the source's own leading indentation is preserved.
 fn strip_carcass_comment(line: &str) -> &str {
     let cut = line.find("// <").unwrap_or(line.len());
-    line[..cut].trim()
+    line[..cut].trim_end()
 }
 
 /// Build RVA -> name maps for call/data target annotation. Module symbols

@@ -67,9 +67,13 @@ pub fn render_structure(f: &FunctionEntry) -> String {
     // Body-less functions (empty `{}`) carry only the synthetic frame braces,
     // which the two PDBs encode with a varying statement count (1 or 2). Normalize
     // every form to an empty body: header line only, zero statement rows.
+    let func_va = f.image_base.wrapping_add(f.rva);
     if f.is_body_less() {
-        let _ = writeln!(out, "{}: ; 0 statements, 0x{:x} bytes", f.name, f.size);
+        let _ = writeln!(out, "; 0x{:x}, 0 statements, 0x{:x} bytes", func_va, f.size);
+        let _ = writeln!(out, "{}", f.name);
+        let _ = writeln!(out, "{{");
         render_locals_into(&mut out, f);
+        let _ = writeln!(out, "}}");
         return out;
     }
 
@@ -79,7 +83,11 @@ pub fn render_structure(f: &FunctionEntry) -> String {
     // and the locals, so this view matches the carcass's `// FUNCTION BODY` +
     // `// LOCALS` (each declared local is its own statement under /Od).
     let n = f.statements.len();
-    let _ = writeln!(out, "{}: ; {} statements, 0x{:x} bytes", f.name, n - 2, f.size);
+    // Stats on their own comment line so the signature line stays short.
+    let _ = writeln!(out, "; 0x{:x}, {} statements, 0x{:x} bytes", func_va, n - 2, f.size);
+    let _ = writeln!(out, "{}", f.name);
+    // Wrap the body in braces for clarity (echoes the synthetic frame `{`/`}`).
+    let _ = writeln!(out, "{{");
     render_locals_into(&mut out, f);
 
     // Body rows (strictly between the synthetic frame braces): absolute VA, function
@@ -139,13 +147,25 @@ pub fn render_structure(f: &FunctionEntry) -> String {
     let has_scope = rows.iter().any(|r| r.depth > 0);
     let wsc = rows.iter().map(|r| scope_cell(r.depth).len()).max().unwrap_or(0).max("scope".len());
 
+    // `code` column (the base's source text) appears only when some row carries it.
+    let has_code = rows.iter().any(|r| r.src.is_some());
+
+    // Header + separator, assembled from the present columns so they always align.
+    let mut header = format!("{:<wa$}|{:<wo$}|{:^ws$}", "address", "offst", "size");
+    let mut sep = format!("{}+{}+{}", "-".repeat(wa), "-".repeat(wo), "-".repeat(ws));
     if has_scope {
-        let _ = writeln!(out, "{:<wa$}|{:<wo$}|{:^ws$}|{:^wsc$}|{:<wl$}", "address", "offst", "size", "scope", "line");
-        let _ = writeln!(out, "{}+{}+{}+{}+{}", "-".repeat(wa), "-".repeat(wo), "-".repeat(ws), "-".repeat(wsc), "-".repeat(wl));
-    } else {
-        let _ = writeln!(out, "{:<wa$}|{:<wo$}|{:^ws$}|{:<wl$}", "address", "offst", "size", "line");
-        let _ = writeln!(out, "{}+{}+{}+{}", "-".repeat(wa), "-".repeat(wo), "-".repeat(ws), "-".repeat(wl));
+        header += &format!("|{:^wsc$}", "scope");
+        sep += &format!("+{}", "-".repeat(wsc));
     }
+    header += &format!("|{:<wl$}", "line");
+    sep += &format!("+{}", "-".repeat(wl));
+    if has_code {
+        header += "|code";
+        sep += "+----";
+    }
+    let _ = writeln!(out, "{}", header);
+    let _ = writeln!(out, "{}", sep);
+
     for r in &rows {
         let sign = if r.delta < 0 { "-" } else { "+" };
         let _ = write!(
@@ -158,17 +178,21 @@ pub fn render_structure(f: &FunctionEntry) -> String {
         if has_scope {
             let _ = write!(out, "{:<wsc$}|", scope_cell(r.depth));
         }
-        // Pad `line` only when source text trails it (base), so target rows carry no
-        // trailing whitespace.
-        match &r.src {
-            Some(s) => {
-                let _ = writeln!(out, "{:<wl$}\t{s}", r.line);
+        // When a `code` column is present, pad `line` to its width and add a `|` so
+        // the source lines up; otherwise emit `line` bare (no trailing whitespace).
+        match (&r.src, has_code) {
+            (Some(s), _) => {
+                let _ = writeln!(out, "{:<wl$}|{s}", r.line);
             }
-            None => {
+            (None, true) => {
+                let _ = writeln!(out, "{:<wl$}|", r.line);
+            }
+            (None, false) => {
                 let _ = writeln!(out, "{}", r.line);
             }
         }
     }
+    let _ = writeln!(out, "}}");
     out
 }
 
@@ -179,6 +203,8 @@ fn render_locals_into(out: &mut String, f: &FunctionEntry) {
     if f.locals.is_empty() {
         return;
     }
+    // Blank lines around the block keep it from crowding the signature / table.
+    let _ = writeln!(out);
     let _ = writeln!(out, "; locals ({}):", f.locals.len());
     // Align the type and name columns; spell out the scope depth (a local declared
     // inside nested `{}` blocks) so it doesn't read like the type's template brackets.
@@ -187,8 +213,9 @@ fn render_locals_into(out: &mut String, f: &FunctionEntry) {
     for l in &f.locals {
         let mut line = format!(";   {:<wt$}  {:<wn$}", l.ty, l.name);
         if l.scope > 0 {
-            line += &format!("  scope: {}", l.scope);
+            line += &format!(" | scope: {}", l.scope);
         }
         let _ = writeln!(out, "{}", line.trim_end());
     }
+    let _ = writeln!(out);
 }
