@@ -60,6 +60,12 @@ struct Cli {
     #[arg(long, value_parser = parse_hex)]
     rva: Option<u32>,
 
+    /// Absolute VA (hex) selecting the function that contains it - the twin of
+    /// --rva for the addresses listings/carcasses print (va = image_base + rva),
+    /// so no manual image-base subtraction.
+    #[arg(long, value_parser = parse_hex)]
+    va: Option<u32>,
+
     // Select ONE body statement for `--view target`/`base` (mutually exclusive) -
     // shows just that statement's disassembly, for comparing one diverging
     // statement target-vs-base without pulling the whole function into context.
@@ -123,7 +129,7 @@ fn first_match(index: &Path, query: &Query) -> Result<Option<FunctionEntry>, Str
     let mut hits = search(index, query).map_err(|e| e.to_string())?;
     if hits.len() > 1 {
         eprintln!(
-            "note: {} matches in {}, using the first ({}); narrow with --rva for an exact pick",
+            "note: {} matches in {}, using the first ({}); narrow with --rva/--va for an exact pick",
             hits.len(),
             index.display(),
             hits[0].name,
@@ -189,18 +195,20 @@ fn main() {
         eprintln!("error: supply --target-index and/or --base-index");
         std::process::exit(2);
     }
-    if cli.function.is_none() && cli.rva.is_none() && cli.address.is_none() {
-        eprintln!("error: select a function with --function, --rva, or --address");
+    if cli.function.is_none() && cli.rva.is_none() && cli.va.is_none() && cli.address.is_none() {
+        eprintln!("error: select a function with --function, --rva, --va, or --address");
         std::process::exit(2);
     }
 
-    // An absolute --address also SELECTS the function it falls in (no need for
-    // --function). --offset is function-relative, so it can't select on its own.
-    let containing = if cli.function.is_none() && cli.rva.is_none() {
+    // --va selects by absolute address outright; an absolute --address also
+    // SELECTS the function it falls in when no other selector is given (its
+    // primary role is picking a statement). --offset is function-relative, so
+    // it can't select on its own.
+    let containing = cli.va.or(if cli.function.is_none() && cli.rva.is_none() {
         cli.address
     } else {
         None
-    };
+    });
     let query = Query {
         name: cli.function.as_deref(),
         rva: cli.rva,
@@ -364,10 +372,14 @@ fn print_diff(cli: &Cli, base: &FunctionEntry, target: &FunctionEntry) {
 
 /// Human-readable rendering of the function selector, for error messages.
 fn describe_selector(cli: &Cli) -> String {
-    match (&cli.function, cli.rva) {
-        (Some(n), Some(rva)) => format!("'{n}' (rva 0x{rva:x})"),
+    let addr = cli
+        .rva
+        .map(|v| format!("rva 0x{v:x}"))
+        .or_else(|| cli.va.map(|v| format!("va 0x{v:x}")));
+    match (&cli.function, addr) {
+        (Some(n), Some(a)) => format!("'{n}' ({a})"),
         (Some(n), None) => format!("'{n}'"),
-        (None, Some(rva)) => format!("rva 0x{rva:x}"),
+        (None, Some(a)) => a,
         (None, None) => "<none>".to_string(),
     }
 }

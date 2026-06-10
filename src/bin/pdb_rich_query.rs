@@ -7,6 +7,7 @@
 //!     --mode target --out out/rich
 //!   pdb_rich_query --index out/rich/index.jsonl --function contact_test
 //!   pdb_rich_query --index out/rich/index.jsonl --rva 0x1a2b3c
+//!   pdb_rich_query --index out/rich/index.jsonl --va 0x41a2b3c
 //!   pdb_rich_query --index out/rich/index.jsonl --function bt_ghost_object --list
 
 use std::path::PathBuf;
@@ -30,6 +31,11 @@ struct Cli {
     #[arg(long, value_parser = parse_hex)]
     rva: Option<u32>,
 
+    /// Absolute VA (hex) selecting the function that contains it - the twin of
+    /// --rva for the addresses listings/carcasses print (va = image_base + rva).
+    #[arg(long, value_parser = parse_hex)]
+    va: Option<u32>,
+
     /// List matches as `rva  file  signature` instead of printing their bodies.
     #[arg(long)]
     list: bool,
@@ -49,6 +55,7 @@ fn main() {
     let query = Query {
         name: cli.function.as_deref(),
         rva: cli.rva,
+        containing_va: cli.va,
         ..Default::default()
     };
 
