@@ -325,16 +325,20 @@ pub fn render_structure_diff(base: &FunctionEntry, target: &FunctionEntry) -> St
         baddr: Option<u32>,
         tsize: Option<u32>,
         bsize: Option<u32>,
-        line: u32,
+        tline: Option<u32>,
+        bline: Option<u32>,
         code: String,
         tag: String,
     }
     // Signed `b.sz - t.sz` (base minus target): positive = base is LARGER and must
     // shrink, negative = base is smaller and must grow.
     let signed_hex = |d: i64| if d >= 0 { format!("+0x{:x}", d) } else { format!("-0x{:x}", -d) };
-    let code_of = |r: &Row, line: u32| match r {
+    // No source text (target side, or a base stmt without captured source) renders
+    // as `--`; the statement's LINE always goes in the dedicated line column - never
+    // an `L<n>` stand-in here (it read as inconsistent output).
+    let code_of = |r: &Row, _line: u32| match r {
         Row::Stmt { source: Some(s), .. } => s.to_string(),
-        _ => format!("L{line}"),
+        _ => "--".to_string(),
     };
 
     let mut ds: Vec<D> = Vec::new();
@@ -348,20 +352,20 @@ pub fn render_structure_diff(base: &FunctionEntry, target: &FunctionEntry) -> St
             // SIZE: same statement, different byte size. Anchor on the editable BASE
             // side (line/code); the target contributes its size (the goal).
             StructRow::Changed { base: b, target: t } => {
-                if let (Row::Stmt { off: toff, size: ts, .. }, Row::Stmt { off: boff, size: bs, line, .. }) = (t, b) {
+                if let (Row::Stmt { off: toff, size: ts, line: tline, .. }, Row::Stmt { off: boff, size: bs, line, .. }) = (t, b) {
                     let delta = signed_hex(*bs as i64 - *ts as i64);
-                    ds.push(D { taddr: Some(va(target, *toff)), baddr: Some(va(base, *boff)), tsize: Some(*ts), bsize: Some(*bs), line: *line, code: code_of(b, *line), tag: format!("SIZE {delta}") });
+                    ds.push(D { taddr: Some(va(target, *toff)), baddr: Some(va(base, *boff)), tsize: Some(*ts), bsize: Some(*bs), tline: Some(*tline), bline: Some(*line), code: code_of(b, *line), tag: format!("SIZE {delta}") });
                 }
             }
             // Quantity: a statement present on one side only.
             StructRow::OnlyTarget { stmt } => {
                 if let Row::Stmt { off, size, line, .. } = stmt {
-                    ds.push(D { taddr: Some(va(target, *off)), baddr: None, tsize: Some(*size), bsize: None, line: *line, code: code_of(stmt, *line), tag: "TRGT_ONLY".to_string() });
+                    ds.push(D { taddr: Some(va(target, *off)), baddr: None, tsize: Some(*size), bsize: None, tline: Some(*line), bline: None, code: code_of(stmt, *line), tag: "TRGT_ONLY".to_string() });
                 }
             }
             StructRow::OnlyBase { stmt } => {
                 if let Row::Stmt { off, size, line, .. } = stmt {
-                    ds.push(D { taddr: None, baddr: Some(va(base, *off)), tsize: None, bsize: Some(*size), line: *line, code: code_of(stmt, *line), tag: "BASE_ONLY".to_string() });
+                    ds.push(D { taddr: None, baddr: Some(va(base, *off)), tsize: None, bsize: Some(*size), tline: None, bline: Some(*line), code: code_of(stmt, *line), tag: "BASE_ONLY".to_string() });
                 }
             }
         }
@@ -392,17 +396,21 @@ pub fn render_structure_diff(base: &FunctionEntry, target: &FunctionEntry) -> St
         let wba = ds.iter().map(|d| addr(d.baddr).len()).max().unwrap_or(0).max("b.addr".len());
         let wt = ds.iter().map(|d| sz(d.tsize).len()).max().unwrap_or(0).max("t.sz".len());
         let wb = ds.iter().map(|d| sz(d.bsize).len()).max().unwrap_or(0).max("b.sz".len());
-        let wl = ds.iter().map(|d| d.line.to_string().len()).max().unwrap_or(0).max("b.line".len());
-        let _ = writeln!(out, "{:<wd$}|{:<wta$}|{:<wba$}|{:<wt$}|{:<wb$}|{:<wl$}|b.code", "b.diff", "t.addr", "b.addr", "t.sz", "b.sz", "b.line");
-        let _ = writeln!(out, "{}+{}+{}+{}+{}+{}+------", "-".repeat(wd), "-".repeat(wta), "-".repeat(wba), "-".repeat(wt), "-".repeat(wb), "-".repeat(wl));
+        // Lines print as DELTAS from each side's first statement line ("0", "+2",
+        // ...), one scale per column - corresponding rows align across sides
+        // without mixing the two absolute line-number spaces. A TRGT_ONLY row's
+        // lookup identity is its t.addr (feed it to --address).
+        let tref = target_rows.iter().find_map(|r| if let Row::Stmt { line, .. } = r { Some(*line) } else { None }).unwrap_or(0);
+        let bref = base_rows.iter().find_map(|r| if let Row::Stmt { line, .. } = r { Some(*line) } else { None }).unwrap_or(0);
+        let dl = |l: Option<u32>, r: u32| l.map(|l| { let d = l as i64 - r as i64; if d > 0 { format!("+{d}") } else { d.to_string() } }).unwrap_or_else(|| "--".into());
+        let wtl = ds.iter().map(|d| dl(d.tline, tref).len()).max().unwrap_or(0).max("t.ln".len());
+        let wbl = ds.iter().map(|d| dl(d.bline, bref).len()).max().unwrap_or(0).max("b.ln".len());
+        let _ = writeln!(out, "; t.ln/b.ln: line deltas from each side's first statement");
+        let _ = writeln!(out, "{:<wd$}|{:<wta$}|{:<wba$}|{:<wt$}|{:<wb$}|{:<wtl$}|{:<wbl$}|b.code", "b.diff", "t.addr", "b.addr", "t.sz", "b.sz", "t.ln", "b.ln");
+        let _ = writeln!(out, "{}+{}+{}+{}+{}+{}+{}+------", "-".repeat(wd), "-".repeat(wta), "-".repeat(wba), "-".repeat(wt), "-".repeat(wb), "-".repeat(wtl), "-".repeat(wbl));
         for d in &ds {
-            // A TRGT_ONLY row has no base statement - base line/code are `--`.
-            let (bline, bcode): (String, &str) = if d.baddr.is_some() {
-                (d.line.to_string(), d.code.as_str())
-            } else {
-                ("--".to_string(), "--")
-            };
-            let _ = writeln!(out, "{:<wd$}|{:<wta$}|{:<wba$}|{:<wt$}|{:<wb$}|{:<wl$}|{}", d.tag, addr(d.taddr), addr(d.baddr), sz(d.tsize), sz(d.bsize), bline, bcode);
+            let bcode: &str = if d.baddr.is_some() { d.code.as_str() } else { "--" };
+            let _ = writeln!(out, "{:<wd$}|{:<wta$}|{:<wba$}|{:<wt$}|{:<wb$}|{:<wtl$}|{:<wbl$}|{}", d.tag, addr(d.taddr), addr(d.baddr), sz(d.tsize), sz(d.bsize), dl(d.tline, tref), dl(d.bline, bref), bcode);
         }
     }
     let _ = writeln!(out, "}}");
