@@ -253,7 +253,7 @@ const COL_WIDTH_ADDR: usize = 6;
 const COL_WIDTH_RVA: usize = 8;
 const COL_WIDTH_FILE: usize = 40;
 const COL_WIDTH_STATUS: usize = 12;
-const COL_WIDTH_STRUCT: usize = 6;
+const COL_WIDTH_STRUCT: usize = 18;
 
 fn ellipsis(s: &str, w: usize) -> String {
     if s.len() <= w {
@@ -283,7 +283,7 @@ fn print_list_table(functions: &[&report_stats::FuncEntry], total: usize) {
     let has_enriched = functions.iter().any(|f| f.enriched.is_some());
     let has_struct = functions
         .iter()
-        .any(|f| f.enriched.as_ref().and_then(|e| e.structure_match).is_some());
+        .any(|f| f.enriched.as_ref().and_then(|e| e.structure.as_ref()).is_some());
 
     if has_demangled {
         print!("{:<COL_WIDTH_DEMANGLED$}  ", "DEMANGLED");
@@ -296,7 +296,7 @@ fn print_list_table(functions: &[&report_stats::FuncEntry], total: usize) {
         print!("{:>COL_WIDTH_RVA$}  ", "RVA");
         print!("{:<COL_WIDTH_FILE$}  ", "FILE");
         if has_struct {
-            print!("  {:>COL_WIDTH_STRUCT$}", "STRUCT");
+            print!("  STRUCT  ");
         }
     } else {
         print!("{:>COL_WIDTH_ADDR$}  ", "ADDR");
@@ -321,12 +321,24 @@ fn print_list_table(functions: &[&report_stats::FuncEntry], total: usize) {
                 ellipsis(&enr.file, COL_WIDTH_FILE)
             );
             if has_struct {
-                let sm = match enr.structure_match {
-                    Some(true) => " MATCH",
-                    Some(false) => "MISMAT",
-                    None => "     -",
+                let s = enr.structure.as_ref();
+                let sm = match s {
+                    Some(s) if s.clean => format!("MATCH ({}/{})", s.base_stmts, s.target_stmts),
+                    Some(s) => {
+                        let base = format!(
+                            "{}/{} +{}B -{}T",
+                            s.base_stmts, s.target_stmts,
+                            s.base_only, s.target_only,
+                        );
+                        if s.changed_size > 0 {
+                            format!("{base} ~{}", s.changed_size)
+                        } else {
+                            base
+                        }
+                    }
+                    None => "-".to_string(),
                 };
-                print!("  {:>COL_WIDTH_STRUCT$}", sm);
+                print!("  {:<COL_WIDTH_STRUCT$}", sm);
             }
         } else {
             print!("{:>COL_WIDTH_ADDR$}  ", format!("0x{:x}", f.address));

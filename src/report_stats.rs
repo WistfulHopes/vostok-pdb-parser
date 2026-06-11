@@ -120,10 +120,30 @@ pub struct IndexEnrichment {
     #[serde(serialize_with = "serialize_hex_u32")]
     pub rva: u32,
     pub file: String,
-    /// Statement-structure match (base vs target). Present only when both
-    /// `--base-index` and `--target-index` are supplied.
+    /// Statement-structure diff summary (base vs target). Present only when
+    /// both `--base-index` and `--target-index` are supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub structure_match: Option<bool>,
+    pub structure: Option<StructureSummary>,
+}
+
+/// Compact statement-structure diff summary.
+///
+/// `0-0/+0/-0/~0` means no divergence — a clean structure match.  The
+/// notation reads `<base N>-<target N>/+<base-only>/-<target-only>/~<changed-size>`.
+#[derive(Clone, Serialize)]
+pub struct StructureSummary {
+    /// Statement count on the base side.
+    pub base_stmts: usize,
+    /// Statement count on the target side.
+    pub target_stmts: usize,
+    /// Statements present only in base.
+    pub base_only: usize,
+    /// Statements present only in target.
+    pub target_only: usize,
+    /// Statements present on both sides but with different byte size.
+    pub changed_size: usize,
+    /// Whether every statement matched exactly (all Equal / EmptyEqual).
+    pub clean: bool,
 }
 
 /// Lightweight orphan-classification mark attached to a `FuncEntry`.
@@ -497,7 +517,7 @@ pub fn enrich(functions: &mut [FuncEntry], index: &HashMap<String, IndexEntry>) 
             f.enriched = Some(IndexEnrichment {
                 rva: e.rva,
                 file: e.file.clone(),
-                structure_match: None,
+                structure: None,
             });
         }
     }
@@ -563,13 +583,14 @@ pub fn load_full_index(
     Ok(map)
 }
 
-/// Run statement-structure match for every function in `functions` that has
-/// entries in both base and target full-index maps. Sets `enriched.structure_match`.
+/// Run statement-structure diff for every function in `functions` that has
+/// entries in both base and target full-index maps.  Sets `enriched.structure`.
 pub fn check_structure_matches(
     functions: &mut [FuncEntry],
     base_idx: &HashMap<String, crate::rich_context::FunctionEntry>,
     target_idx: &HashMap<String, crate::rich_context::FunctionEntry>,
 ) {
+    use crate::rich_structure_diff::StructRow;
     for f in functions {
         let (Some(b), Some(t)) = (base_idx.get(&f.name), target_idx.get(&f.name)) else {
             continue;
@@ -577,15 +598,28 @@ pub fn check_structure_matches(
         let b_rows = crate::rich_structure_diff::structure_rows(b);
         let t_rows = crate::rich_structure_diff::structure_rows(t);
         let diff = crate::rich_structure_diff::diff_structure(&b_rows, &t_rows);
-        let all_match = diff.iter().all(|r| {
-            matches!(
-                r,
-                crate::rich_structure_diff::StructRow::Equal { .. }
-                    | crate::rich_structure_diff::StructRow::EmptyEqual
-            )
-        });
+
+        let mut base_only = 0usize;
+        let mut target_only = 0usize;
+        let mut changed_size = 0usize;
+        for r in &diff {
+            match r {
+                StructRow::OnlyBase { .. } | StructRow::EmptyOnlyBase => base_only += 1,
+                StructRow::OnlyTarget { .. } | StructRow::EmptyOnlyTarget => target_only += 1,
+                StructRow::Changed { .. } => changed_size += 1,
+                StructRow::Equal { .. } | StructRow::EmptyEqual => {}
+            }
+        }
+        let clean = base_only == 0 && target_only == 0 && changed_size == 0;
         if let Some(ref mut enr) = f.enriched {
-            enr.structure_match = Some(all_match);
+            enr.structure = Some(StructureSummary {
+                base_stmts: b_rows.len(),
+                target_stmts: t_rows.len(),
+                base_only,
+                target_only,
+                changed_size,
+                clean,
+            });
         }
     }
 }
