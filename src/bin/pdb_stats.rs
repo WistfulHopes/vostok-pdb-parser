@@ -253,6 +253,7 @@ const COL_WIDTH_ADDR: usize = 6;
 const COL_WIDTH_RVA: usize = 8;
 const COL_WIDTH_FILE: usize = 40;
 const COL_WIDTH_STATUS: usize = 12;
+const COL_WIDTH_STRUCT: usize = 6;
 
 fn ellipsis(s: &str, w: usize) -> String {
     if s.len() <= w {
@@ -280,6 +281,9 @@ fn status_str(entry: &report_stats::FuncEntry) -> String {
 fn print_list_table(functions: &[&report_stats::FuncEntry], total: usize) {
     let has_demangled = functions.iter().any(|f| f.demangled.is_some());
     let has_enriched = functions.iter().any(|f| f.enriched.is_some());
+    let has_struct = functions
+        .iter()
+        .any(|f| f.enriched.as_ref().and_then(|e| e.structure_match).is_some());
 
     if has_demangled {
         print!("{:<COL_WIDTH_DEMANGLED$}  ", "DEMANGLED");
@@ -291,6 +295,9 @@ fn print_list_table(functions: &[&report_stats::FuncEntry], total: usize) {
     if has_enriched {
         print!("{:>COL_WIDTH_RVA$}  ", "RVA");
         print!("{:<COL_WIDTH_FILE$}  ", "FILE");
+        if has_struct {
+            print!("  {:>COL_WIDTH_STRUCT$}", "STRUCT");
+        }
     } else {
         print!("{:>COL_WIDTH_ADDR$}  ", "ADDR");
     }
@@ -313,6 +320,14 @@ fn print_list_table(functions: &[&report_stats::FuncEntry], total: usize) {
                 "{:<COL_WIDTH_FILE$}  ",
                 ellipsis(&enr.file, COL_WIDTH_FILE)
             );
+            if has_struct {
+                let sm = match enr.structure_match {
+                    Some(true) => " MATCH",
+                    Some(false) => "MISMAT",
+                    None => "     -",
+                };
+                print!("  {:>COL_WIDTH_STRUCT$}", sm);
+            }
         } else {
             print!("{:>COL_WIDTH_ADDR$}  ", format!("0x{:x}", f.address));
         }
@@ -585,6 +600,27 @@ fn main() -> anyhow::Result<()> {
             if let Some(ref idx) = target_idx {
                 report_stats::enrich(&mut functions, idx);
             }
+            // Structure match when both indexes are available.
+            if let (Some(_base), Some(_target)) = (&base_idx, &target_idx) {
+                let matched_set: HashMap<String, bool> = functions
+                    .iter()
+                    .filter(|f| f.enriched.is_some())
+                    .map(|f| (f.name.clone(), true))
+                    .collect();
+                if !matched_set.is_empty() {
+                    let base_full = report_stats::load_full_index(
+                        &cli.base_index.as_ref().unwrap(),
+                        &matched_set,
+                    )?;
+                    let target_full = report_stats::load_full_index(
+                        &cli.target_index.as_ref().unwrap(),
+                        &matched_set,
+                    )?;
+                    report_stats::check_structure_matches(
+                        &mut functions, &base_full, &target_full,
+                    );
+                }
+            }
 
             let filter = report_stats::FuncFilter {
                 unit_pattern: unit_pattern.as_deref(),
@@ -705,6 +741,27 @@ fn main() -> anyhow::Result<()> {
 
             if let Some(ref idx) = target_idx {
                 report_stats::enrich(&mut functions, idx);
+            }
+            // Structure match when both indexes are available.
+            if let (Some(_base), Some(_target)) = (&base_idx, &target_idx) {
+                let matched_set: HashMap<String, bool> = functions
+                    .iter()
+                    .filter(|f| f.enriched.is_some())
+                    .map(|f| (f.name.clone(), true))
+                    .collect();
+                if !matched_set.is_empty() {
+                    let base_full = report_stats::load_full_index(
+                        &cli.base_index.as_ref().unwrap(),
+                        &matched_set,
+                    )?;
+                    let target_full = report_stats::load_full_index(
+                        &cli.target_index.as_ref().unwrap(),
+                        &matched_set,
+                    )?;
+                    report_stats::check_structure_matches(
+                        &mut functions, &base_full, &target_full,
+                    );
+                }
             }
 
             let filter = report_stats::FuncFilter {

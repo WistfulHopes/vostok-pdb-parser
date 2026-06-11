@@ -120,6 +120,10 @@ pub struct IndexEnrichment {
     #[serde(serialize_with = "serialize_hex_u32")]
     pub rva: u32,
     pub file: String,
+    /// Statement-structure match (base vs target). Present only when both
+    /// `--base-index` and `--target-index` are supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub structure_match: Option<bool>,
 }
 
 /// Lightweight orphan-classification mark attached to a `FuncEntry`.
@@ -493,6 +497,7 @@ pub fn enrich(functions: &mut [FuncEntry], index: &HashMap<String, IndexEntry>) 
             f.enriched = Some(IndexEnrichment {
                 rva: e.rva,
                 file: e.file.clone(),
+                structure_match: None,
             });
         }
     }
@@ -530,6 +535,57 @@ pub fn classify(
                 status: e.status.clone(),
                 reason: e.reason.clone(),
             });
+        }
+    }
+}
+
+/// Load the full index (including statements) for structure-match computation.
+/// Only returns entries that are also present in `filter_set` (matched functions).
+pub fn load_full_index(
+    path: &Path,
+    filter_set: &HashMap<String, bool>,
+) -> anyhow::Result<HashMap<String, crate::rich_context::FunctionEntry>> {
+    let file =
+        std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let reader = std::io::BufReader::new(file);
+    let mut map = HashMap::new();
+    for line in reader.lines() {
+        let line = line.context("reading index line")?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let entry: crate::rich_context::FunctionEntry =
+            serde_json::from_str(&line).context("deserialising index entry")?;
+        if filter_set.contains_key(&entry.mangled) {
+            map.insert(entry.mangled.clone(), entry);
+        }
+    }
+    Ok(map)
+}
+
+/// Run statement-structure match for every function in `functions` that has
+/// entries in both base and target full-index maps. Sets `enriched.structure_match`.
+pub fn check_structure_matches(
+    functions: &mut [FuncEntry],
+    base_idx: &HashMap<String, crate::rich_context::FunctionEntry>,
+    target_idx: &HashMap<String, crate::rich_context::FunctionEntry>,
+) {
+    for f in functions {
+        let (Some(b), Some(t)) = (base_idx.get(&f.name), target_idx.get(&f.name)) else {
+            continue;
+        };
+        let b_rows = crate::rich_structure_diff::structure_rows(b);
+        let t_rows = crate::rich_structure_diff::structure_rows(t);
+        let diff = crate::rich_structure_diff::diff_structure(&b_rows, &t_rows);
+        let all_match = diff.iter().all(|r| {
+            matches!(
+                r,
+                crate::rich_structure_diff::StructRow::Equal { .. }
+                    | crate::rich_structure_diff::StructRow::EmptyEqual
+            )
+        });
+        if let Some(ref mut enr) = f.enriched {
+            enr.structure_match = Some(all_match);
         }
     }
 }
