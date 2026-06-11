@@ -109,6 +109,9 @@ pub struct FuncEntry {
     /// Fields filled from `index.jsonl` when `--target-index` is supplied.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enriched: Option<IndexEnrichment>,
+    /// Orphan classification from `orphan-classifications.jsonl`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classification: Option<ClassMark>,
 }
 
 /// Fields cross-referenced from `index.jsonl` by mangled name.
@@ -117,6 +120,14 @@ pub struct IndexEnrichment {
     #[serde(serialize_with = "serialize_hex_u32")]
     pub rva: u32,
     pub file: String,
+}
+
+/// Lightweight orphan-classification mark attached to a `FuncEntry`.
+#[derive(Clone, Serialize)]
+pub struct ClassMark {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// A lightweight index entry — only the fields needed for enrichment and
@@ -142,6 +153,7 @@ pub struct FuncFilter<'a> {
     pub max_percent: Option<f64>,
     pub matched_only: bool,
     pub min_size: Option<u64>,
+    pub status_filter: Option<&'a str>,
     pub limit: Option<usize>,
     pub sort: SortField,
     pub order: SortOrder,
@@ -155,6 +167,7 @@ impl<'a> Default for FuncFilter<'a> {
             max_percent: None,
             matched_only: false,
             min_size: None,
+            status_filter: None,
             limit: None,
             sort: SortField::default(),
             order: SortOrder::default(),
@@ -251,6 +264,7 @@ pub fn load_report(path: &Path) -> anyhow::Result<Vec<FuncEntry>> {
                 fuzzy_match_percent: func.fuzzy_match_percent,
                 address: parse_json_string_u64(&func.address)?,
                 enriched: None,
+                classification: None,
             });
         }
     }
@@ -301,6 +315,12 @@ pub fn filter_functions<'a>(
             if let Some(pat) = &filter.unit_pattern {
                 if !f.unit.contains(pat) {
                     return false;
+                }
+            }
+            if let Some(st) = &filter.status_filter {
+                match &f.classification {
+                    Some(c) if c.status == *st => {}
+                    _ => return false,
                 }
             }
             true
@@ -497,6 +517,21 @@ pub fn cross_ref_orphans(
         .collect();
     result.sort_by(|a, b| a.mangled.cmp(&b.mangled));
     result
+}
+
+/// Attach classification marks to functions by mangled name.
+pub fn classify(
+    functions: &mut [FuncEntry],
+    db: &HashMap<String, crate::orphan_classify::ClassEntry>,
+) {
+    for f in functions {
+        if let Some(e) = db.get(&f.name) {
+            f.classification = Some(ClassMark {
+                status: e.status.clone(),
+                reason: e.reason.clone(),
+            });
+        }
+    }
 }
 
 /// Build a set of mangled names from a function list (for cross_ref_orphans).

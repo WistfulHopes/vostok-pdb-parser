@@ -13,14 +13,20 @@
 //!
 //!   # Functions only in one side, cross-referenced with the index
 //!   pdb_stats --report report.json --target-index index.jsonl orphans --cross-ref
+//!
+//!   # Mark orphans as unmatchable / todo in the git-tracked classification DB
+//!   pdb_stats classify --db orphan-classifications.jsonl set \
+//!             --mangled "?Free@Scaleform@..." --status unmatchable --reason "SDK"
 
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
+use anyhow::Context;
 use clap::Parser;
 use clap::Subcommand;
 use clap::ValueEnum;
+use vostok_pdb_parser::orphan_classify;
 use vostok_pdb_parser::report_stats;
 
 // ---------------------------------------------------------------------------
@@ -29,9 +35,9 @@ use vostok_pdb_parser::report_stats;
 
 #[derive(Parser)]
 struct Cli {
-    /// Path to objdiff report.json.
+    /// Path to objdiff report.json (required except for `classify`).
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
-    report: PathBuf,
+    report: Option<PathBuf>,
 
     /// Path to target index.jsonl (for enrichment).
     #[arg(long, value_hint = clap::ValueHint::FilePath)]
@@ -57,77 +63,118 @@ struct Cli {
 enum Command {
     /// List functions with match percentages, filterable.
     List {
-        /// Minimum fuzzy_match_percent (inclusive).
         #[arg(long)]
         min_percent: Option<f64>,
-        /// Maximum fuzzy_match_percent (inclusive).
         #[arg(long)]
         max_percent: Option<f64>,
-        /// Exclude unmatched functions (no fuzzy_match_percent).
         #[arg(long)]
         matched_only: bool,
-        /// Substring filter on unit name.
         #[arg(long)]
         unit_pattern: Option<String>,
-        /// Sort field.
         #[arg(long, value_enum, default_value = "percent")]
         sort: SortField,
-        /// Sort direction.
         #[arg(long, value_enum, default_value = "asc")]
         order: SortOrder,
-        /// Max results.
         #[arg(long, default_value = "100")]
         limit: usize,
-        /// Minimum function byte size.
         #[arg(long)]
         min_size: Option<u64>,
     },
     /// Functions with no fuzzy_match_percent (only in one side).
     Orphans {
-        /// Substring filter on unit name.
         #[arg(long)]
         unit_pattern: Option<String>,
-        /// Sort field.
         #[arg(long, value_enum, default_value = "size")]
         sort: SortField,
-        /// Sort direction.
         #[arg(long, value_enum, default_value = "asc")]
         order: SortOrder,
-        /// Max results.
         #[arg(long, default_value = "100")]
         limit: usize,
-        /// Minimum function byte size (skip trivial stubs).
         #[arg(long)]
         min_size: Option<u64>,
-        /// Also scan index.jsonl for entries absent from report entirely.
         #[arg(long)]
         cross_ref: bool,
+        /// Path to orphan-classifications.jsonl.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        classifications: Option<PathBuf>,
+        /// Filter by classification status (pending / unmatchable / todo).
+        #[arg(long)]
+        status: Option<String>,
     },
     /// Aggregate bucketed match distribution.
     Summary {
-        /// Substring filter on unit name.
         #[arg(long)]
         unit_pattern: Option<String>,
-        /// Include per-unit breakdown.
         #[arg(long)]
         by_unit: bool,
     },
-    /// Convenience: smallest functions below a threshold (--sort size asc
-    /// --matched-only --max-percent ...).
+    /// Convenience: smallest functions below a threshold.
     Simplest {
-        /// Only functions at or below this match percent (default 99).
         #[arg(long, default_value = "99")]
         max_percent: f64,
-        /// Substring filter on unit name.
         #[arg(long)]
         unit_pattern: Option<String>,
-        /// Max results.
         #[arg(long, default_value = "20")]
         limit: usize,
-        /// Minimum function byte size.
         #[arg(long)]
         min_size: Option<u64>,
     },
+    /// Manage the git-tracked orphan classification database.
+    Classify {
+        /// Path to orphan-classifications.jsonl.
+        #[arg(long, value_hint = clap::ValueHint::FilePath)]
+        db: PathBuf,
+        #[command(subcommand)]
+        action: ClassifyAction,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClassifyAction {
+    /// Insert or update a classification entry.
+    Set {
+        /// Mangled function name.
+        #[arg(long)]
+        mangled: String,
+        /// Classification status.
+        #[arg(long, value_enum)]
+        status: ClassStatus,
+        /// Free-text reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// List entries in the classification database.
+    Show {
+        /// Filter by status.
+        #[arg(long)]
+        status: Option<String>,
+        /// Substring filter on mangled name.
+        #[arg(long)]
+        mangled_pattern: Option<String>,
+    },
+    /// Remove an entry from the classification database.
+    Rm {
+        /// Mangled function name.
+        #[arg(long)]
+        mangled: String,
+    },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ClassStatus {
+    Pending,
+    Unmatchable,
+    Todo,
+}
+
+impl std::fmt::Display for ClassStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ClassStatus::Pending => write!(f, "pending"),
+            ClassStatus::Unmatchable => write!(f, "unmatchable"),
+            ClassStatus::Todo => write!(f, "todo"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -176,6 +223,12 @@ struct ListOutput<'a> {
     functions: Vec<&'a report_stats::FuncEntry>,
 }
 
+#[derive(serde::Serialize)]
+struct ClassifyShowOutput {
+    total: usize,
+    entries: Vec<orphan_classify::ClassEntry>,
+}
+
 fn write_json<T: serde::Serialize>(value: &T, pretty: bool) -> anyhow::Result<()> {
     let stdout = std::io::stdout();
     if pretty {
@@ -199,6 +252,7 @@ const COL_WIDTH_PCT: usize = 7;
 const COL_WIDTH_ADDR: usize = 6;
 const COL_WIDTH_RVA: usize = 8;
 const COL_WIDTH_FILE: usize = 40;
+const COL_WIDTH_STATUS: usize = 12;
 
 fn ellipsis(s: &str, w: usize) -> String {
     if s.len() <= w {
@@ -216,14 +270,17 @@ fn pct_str(pct: Option<f64>) -> String {
     }
 }
 
-fn print_list_table(
-    functions: &[&report_stats::FuncEntry],
-    total: usize,
-) {
+fn status_str(entry: &report_stats::FuncEntry) -> String {
+    match &entry.classification {
+        Some(c) => c.status.clone(),
+        None => "pending".to_string(),
+    }
+}
+
+fn print_list_table(functions: &[&report_stats::FuncEntry], total: usize) {
     let has_demangled = functions.iter().any(|f| f.demangled.is_some());
     let has_enriched = functions.iter().any(|f| f.enriched.is_some());
 
-    // Header
     if has_demangled {
         print!("{:<COL_WIDTH_DEMANGLED$}  ", "DEMANGLED");
     }
@@ -252,7 +309,10 @@ fn print_list_table(
         print!("{:>COL_WIDTH_PCT$}  ", pct_str(f.fuzzy_match_percent));
         if let Some(enr) = &f.enriched {
             print!("{:>COL_WIDTH_RVA$}  ", format!("0x{:x}", enr.rva));
-            print!("{:<COL_WIDTH_FILE$}  ", ellipsis(&enr.file, COL_WIDTH_FILE));
+            print!(
+                "{:<COL_WIDTH_FILE$}  ",
+                ellipsis(&enr.file, COL_WIDTH_FILE)
+            );
         } else {
             print!("{:>COL_WIDTH_ADDR$}  ", format!("0x{:x}", f.address));
         }
@@ -266,6 +326,7 @@ fn print_orphan_table(
     functions: &[&report_stats::FuncEntry],
     base_only: Option<&[report_stats::IndexEntry]>,
     target_only: Option<&[report_stats::IndexEntry]>,
+    has_classifications: bool,
 ) {
     let has_demangled = functions.iter().any(|f| f.demangled.is_some());
 
@@ -277,7 +338,10 @@ fn print_orphan_table(
         print!("{:<COL_WIDTH_NAME$}  ", "MANGLED");
         print!("{:<COL_WIDTH_UNIT$}  ", "UNIT");
         print!("{:>COL_WIDTH_SIZE$}  ", "SIZE");
-        print!("{:>COL_WIDTH_ADDR$}", "ADDR");
+        if has_classifications {
+            print!("  {:<COL_WIDTH_STATUS$}", "STATUS");
+        }
+        print!("  {:>COL_WIDTH_ADDR$}", "ADDR");
         println!();
 
         for f in functions {
@@ -290,7 +354,13 @@ fn print_orphan_table(
             print!("{:<COL_WIDTH_NAME$}  ", ellipsis(&f.name, COL_WIDTH_NAME));
             print!("{:<COL_WIDTH_UNIT$}  ", ellipsis(&f.unit, COL_WIDTH_UNIT));
             print!("{:>COL_WIDTH_SIZE$}  ", format!("0x{:x}", f.size));
-            print!("{:>COL_WIDTH_ADDR$}", format!("0x{:x}", f.address));
+            if has_classifications {
+                print!(
+                    "  {:<COL_WIDTH_STATUS$}",
+                    ellipsis(&status_str(f), COL_WIDTH_STATUS)
+                );
+            }
+            print!("  {:>COL_WIDTH_ADDR$}", format!("0x{:x}", f.address));
             println!();
         }
         println!(
@@ -324,10 +394,27 @@ fn print_index_only_table(entries: &[report_stats::IndexEntry]) {
 
     for e in entries {
         print!("{:<COL_WIDTH_NAME$}  ", ellipsis(&e.mangled, COL_WIDTH_NAME));
-        print!("{:<COL_WIDTH_DEMANGLED$}  ", ellipsis(&e.name, COL_WIDTH_DEMANGLED));
+        print!(
+            "{:<COL_WIDTH_DEMANGLED$}  ",
+            ellipsis(&e.name, COL_WIDTH_DEMANGLED)
+        );
         print!("{:>COL_WIDTH_SIZE$}  ", format!("0x{:x}", e.size));
         print!("{:>COL_WIDTH_RVA$}  ", format!("0x{:x}", e.rva));
         print!("{:<COL_WIDTH_FILE$}", ellipsis(&e.file, COL_WIDTH_FILE));
+        println!();
+    }
+}
+
+fn print_classify_table(entries: &[orphan_classify::ClassEntry]) {
+    print!("{:<COL_WIDTH_NAME$}  ", "MANGLED");
+    print!("{:<COL_WIDTH_STATUS$}  ", "STATUS");
+    print!("{:>COL_WIDTH_SIZE$}  ", "REASON");
+    println!();
+
+    for e in entries {
+        print!("{:<COL_WIDTH_NAME$}  ", ellipsis(&e.mangled, COL_WIDTH_NAME));
+        print!("{:<COL_WIDTH_STATUS$}  ", e.status);
+        print!("  {}", e.reason.as_deref().unwrap_or("-"));
         println!();
     }
 }
@@ -363,10 +450,7 @@ fn print_summary_table(summary: &report_stats::Summary) {
     println!("  {:<8} {:>7} {:>10}", "RANGE", "COUNT", "BYTES");
     for label in ["0", "1-49", "50-79", "80-89", "90-94", "95-98", "99-99", "100"] {
         if let Some(b) = summary.buckets.get(label) {
-            println!(
-                "  {:<8} {:>7}  0x{:x}",
-                label, b.count, b.code_bytes
-            );
+            println!("  {:<8} {:>7}  0x{:x}", label, b.count, b.code_bytes);
         }
     }
 
@@ -434,7 +518,8 @@ fn resolve_log_path(cli: &Cli) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("PDB_FETCH_LOG") {
         return Some(PathBuf::from(p));
     }
-    let binaries = cli.report.parent()?.parent()?;
+    let report = cli.report.as_ref()?;
+    let binaries = report.parent()?.parent()?;
     let tool = std::env::args()
         .next()
         .and_then(|a| {
@@ -488,7 +573,8 @@ fn main() -> anyhow::Result<()> {
             limit,
             min_size,
         } => {
-            let mut functions = report_stats::load_report(&cli.report)?;
+            let report = cli.report.as_deref().context("--report is required for `list`")?;
+            let mut functions = report_stats::load_report(report)?;
             let total = functions.len();
             let n_matched = functions
                 .iter()
@@ -496,7 +582,6 @@ fn main() -> anyhow::Result<()> {
                 .count();
             let n_unmatched = total - n_matched;
 
-            // Enrich from target index if available.
             if let Some(ref idx) = target_idx {
                 report_stats::enrich(&mut functions, idx);
             }
@@ -510,6 +595,7 @@ fn main() -> anyhow::Result<()> {
                 limit: Some(limit),
                 sort: sort.into(),
                 order: order.into(),
+                ..Default::default()
             };
             let result = report_stats::filter_functions(&functions, &filter);
 
@@ -533,12 +619,26 @@ fn main() -> anyhow::Result<()> {
             limit,
             min_size,
             cross_ref,
+            classifications,
+            status,
         } => {
-            let functions = report_stats::load_report(&cli.report)?;
+            let report = cli.report.as_deref().context("--report is required for `orphans`")?;
+            let mut functions = report_stats::load_report(report)?;
+
+            // Load classifications if provided.
+            let class_db = classifications
+                .as_deref()
+                .map(|p| orphan_classify::load(p))
+                .transpose()?;
+            let has_class = class_db.is_some();
+            if let Some(ref db) = class_db {
+                report_stats::classify(&mut functions, db);
+            }
 
             let filter = report_stats::FuncFilter {
                 unit_pattern: unit_pattern.as_deref(),
                 min_size,
+                status_filter: status.as_deref(),
                 limit: Some(limit),
                 sort: sort.into(),
                 order: order.into(),
@@ -564,18 +664,12 @@ fn main() -> anyhow::Result<()> {
                     index_only.as_ref().and_then(|(b, _)| b.as_deref());
                 let target_refs: Option<&[report_stats::IndexEntry]> =
                     index_only.as_ref().and_then(|(_, t)| t.as_deref());
-                print_orphan_table(
-                    &result,
-                    base_refs,
-                    target_refs,
-                );
+                print_orphan_table(&result, base_refs, target_refs, has_class);
             } else {
                 let output = report_stats::OrphanOutput {
                     report: result.into_iter().cloned().collect(),
-                    index_only: index_only.map(|(b, t)| report_stats::IndexOnlyOrphans {
-                        base: b,
-                        target: t,
-                    }),
+                    index_only: index_only
+                        .map(|(b, t)| report_stats::IndexOnlyOrphans { base: b, target: t }),
                 };
                 write_json(&output, cli.pretty)?;
             }
@@ -585,10 +679,11 @@ fn main() -> anyhow::Result<()> {
             unit_pattern,
             by_unit,
         } => {
-            let functions = report_stats::load_report(&cli.report)?;
+            let report = cli.report.as_deref().context("--report is required for `summary`")?;
+            let functions = report_stats::load_report(report)?;
             let mut summary =
                 report_stats::compute_summary(&functions, unit_pattern.as_deref(), by_unit);
-            let top = report_stats::load_top_measures(&cli.report)?;
+            let top = report_stats::load_top_measures(report)?;
             report_stats::attach_top_measures(&mut summary, top);
 
             if cli.table {
@@ -604,7 +699,8 @@ fn main() -> anyhow::Result<()> {
             limit,
             min_size,
         } => {
-            let mut functions = report_stats::load_report(&cli.report)?;
+            let report = cli.report.as_deref().context("--report is required for `simplest`")?;
+            let mut functions = report_stats::load_report(report)?;
             let total = functions.len();
 
             if let Some(ref idx) = target_idx {
@@ -635,6 +731,60 @@ fn main() -> anyhow::Result<()> {
                 write_json(&output, cli.pretty)?;
             }
         }
+
+        Command::Classify { db, action } => match action {
+            ClassifyAction::Set {
+                mangled,
+                status,
+                reason,
+            } => {
+                orphan_classify::upsert(&db, &mangled, &status.to_string(), reason.as_deref())?;
+                if !cli.table && !cli.pretty {
+                    println!("{}  {}", mangled, status);
+                }
+            }
+            ClassifyAction::Show {
+                status,
+                mangled_pattern,
+            } => {
+                let db_map = orphan_classify::load(&db)?;
+                let mut entries: Vec<&orphan_classify::ClassEntry> = db_map
+                    .values()
+                    .filter(|e| {
+                        if let Some(ref s) = status {
+                            if e.status != *s {
+                                return false;
+                            }
+                        }
+                        if let Some(ref pat) = mangled_pattern {
+                            if !e.mangled.contains(pat) {
+                                return false;
+                            }
+                        }
+                        true
+                    })
+                    .collect();
+                entries.sort_by(|a, b| a.mangled.cmp(&b.mangled));
+
+                if cli.table {
+                    print_classify_table(
+                        &entries.iter().map(|e| (*e).clone()).collect::<Vec<_>>(),
+                    );
+                } else {
+                    let output = ClassifyShowOutput {
+                        total: entries.len(),
+                        entries: entries.into_iter().cloned().collect(),
+                    };
+                    write_json(&output, cli.pretty)?;
+                }
+            }
+            ClassifyAction::Rm { mangled } => {
+                orphan_classify::remove(&db, &mangled)?;
+                if !cli.table && !cli.pretty {
+                    println!("removed: {mangled}");
+                }
+            }
+        },
     }
 
     Ok(())
