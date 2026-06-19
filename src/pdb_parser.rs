@@ -1,9 +1,9 @@
 use pdb_addr2line::type_parser;
 use pdb_addr2line::type_parser::AttributeFlags;
 
-use pdb_addr2line::{pdb::PDB as Pdb, ContextPdbData as Data, TypeFormatterFlags as Flags};
+use pdb_addr2line::{ContextPdbData as Data, TypeFormatterFlags as Flags, pdb::PDB as Pdb};
 use pdb_addr2line_orig::{
-    pdb::PDB as PdbOrig, ContextPdbData as DataOrig, TypeFormatterFlags as FlagsOrig,
+    ContextPdbData as DataOrig, TypeFormatterFlags as FlagsOrig, pdb::PDB as PdbOrig,
 };
 
 use crate::{Namespace, Type};

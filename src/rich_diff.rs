@@ -53,7 +53,11 @@ impl Diff {
 /// Align `base` vs `target` instruction streams by their text via LCS.
 pub fn diff(base: &FunctionEntry, target: &FunctionEntry) -> Diff {
     let b: Vec<&str> = base.instructions.iter().map(|i| i.text.as_str()).collect();
-    let t: Vec<&str> = target.instructions.iter().map(|i| i.text.as_str()).collect();
+    let t: Vec<&str> = target
+        .instructions
+        .iter()
+        .map(|i| i.text.as_str())
+        .collect();
     let (n, m) = (b.len(), t.len());
 
     // dp[i][j] = LCS length of b[i..] and t[j..].
@@ -73,29 +77,53 @@ pub fn diff(base: &FunctionEntry, target: &FunctionEntry) -> Diff {
     let (mut i, mut j) = (0, 0);
     while i < n && j < m {
         if b[i] == t[j] {
-            lines.push(DiffLine { op: Op::Equal, base: Some(i), target: Some(j) });
+            lines.push(DiffLine {
+                op: Op::Equal,
+                base: Some(i),
+                target: Some(j),
+            });
             matched += 1;
             i += 1;
             j += 1;
         } else if dp[i + 1][j] >= dp[i][j + 1] {
-            lines.push(DiffLine { op: Op::Delete, base: Some(i), target: None });
+            lines.push(DiffLine {
+                op: Op::Delete,
+                base: Some(i),
+                target: None,
+            });
             i += 1;
         } else {
-            lines.push(DiffLine { op: Op::Insert, base: None, target: Some(j) });
+            lines.push(DiffLine {
+                op: Op::Insert,
+                base: None,
+                target: Some(j),
+            });
             j += 1;
         }
     }
     while i < n {
-        lines.push(DiffLine { op: Op::Delete, base: Some(i), target: None });
+        lines.push(DiffLine {
+            op: Op::Delete,
+            base: Some(i),
+            target: None,
+        });
         i += 1;
     }
     while j < m {
-        lines.push(DiffLine { op: Op::Insert, base: None, target: Some(j) });
+        lines.push(DiffLine {
+            op: Op::Insert,
+            base: None,
+            target: Some(j),
+        });
         j += 1;
     }
 
     let total = lines.len();
-    Diff { lines, matched, total }
+    Diff {
+        lines,
+        matched,
+        total,
+    }
 }
 
 /// Render a git-style unified view. `Equal` lines carry no offset (it differs

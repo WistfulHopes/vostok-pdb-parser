@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use clap::ValueEnum;
 
-use vostok_pdb_parser::rich_context::{dump_rich_context, Options};
+use vostok_pdb_parser::rich_context::{Options, dump_rich_context};
 
 #[derive(Copy, Clone, ValueEnum)]
 enum Mode {

@@ -16,7 +16,6 @@ struct Cli {
 
     #[command(flatten)]
     source: SourceArgs,
-
 }
 
 #[derive(clap::Args)]

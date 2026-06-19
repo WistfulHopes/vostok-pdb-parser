@@ -40,7 +40,8 @@ fn is_named_symbol(s: &str) -> bool {
     }
     // A qualified C++ name (`a::b`) or a bare identifier (`memcpy`); never spaces
     // unless it is a qualified name (templates/operators can contain them).
-    matches!(first, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'?') && (s.contains("::") || !s.contains(' '))
+    matches!(first, b'a'..=b'z' | b'A'..=b'Z' | b'_' | b'?')
+        && (s.contains("::") || !s.contains(' '))
 }
 
 fn is_register(s: &str) -> bool {
@@ -80,7 +81,11 @@ pub fn resolve(index: &Path, callees: &[String]) -> crate::Result<BTreeMap<Strin
 }
 
 /// Render the callee list, each with its resolved signature(s) or `(unresolved)`.
-pub fn render(f: &FunctionEntry, callees: &[String], resolved: &BTreeMap<String, Vec<String>>) -> String {
+pub fn render(
+    f: &FunctionEntry,
+    callees: &[String],
+    resolved: &BTreeMap<String, Vec<String>>,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "{}:", f.name);
     let _ = writeln!(out, "; callees ({})", callees.len());

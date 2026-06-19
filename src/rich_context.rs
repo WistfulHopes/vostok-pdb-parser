@@ -297,12 +297,13 @@ pub fn dump_rich_context(pdb_path: &Path, exe_path: &Path, opts: &Options) -> cr
 
                             let src_lines: Option<&Vec<String>> = match (&opts.source_root, &rel) {
                                 (Some(root), Some(rel)) if !opts.target_mode => {
-                                    let entry = source_cache.entry(rel.clone()).or_insert_with(|| {
-                                        let path = root.join(rel.replace('\\', "/"));
-                                        std::fs::read_to_string(&path)
-                                            .ok()
-                                            .map(|s| s.lines().map(str::to_string).collect())
-                                    });
+                                    let entry =
+                                        source_cache.entry(rel.clone()).or_insert_with(|| {
+                                            let path = root.join(rel.replace('\\', "/"));
+                                            std::fs::read_to_string(&path)
+                                                .ok()
+                                                .map(|s| s.lines().map(str::to_string).collect())
+                                        });
                                     entry.as_ref()
                                 }
                                 _ => None,
@@ -335,20 +336,46 @@ pub fn dump_rich_context(pdb_path: &Path, exe_path: &Path, opts: &Options) -> cr
                     // through under optimization. Args (offset >= 0) are skipped —
                     // they are already in the signature.
                     Ok(pdb::SymbolData::BasePointerRelative(b)) if b.offset < 0 => {
-                        push_local(&mut entries, current_entry, &fmt, module_id, b.type_index, b.name, depth);
+                        push_local(
+                            &mut entries,
+                            current_entry,
+                            &fmt,
+                            module_id,
+                            b.type_index,
+                            b.name,
+                            depth,
+                        );
                     }
                     Ok(pdb::SymbolData::RegisterRelative(r)) => {
-                        push_local(&mut entries, current_entry, &fmt, module_id, r.type_index, r.name, depth);
+                        push_local(
+                            &mut entries,
+                            current_entry,
+                            &fmt,
+                            module_id,
+                            r.type_index,
+                            r.name,
+                            depth,
+                        );
                     }
                     Ok(pdb::SymbolData::RegisterVariable(v)) => {
-                        push_local(&mut entries, current_entry, &fmt, module_id, v.type_index, v.name, depth);
+                        push_local(
+                            &mut entries,
+                            current_entry,
+                            &fmt,
+                            module_id,
+                            v.type_index,
+                            v.name,
+                            depth,
+                        );
                     }
 
                     // A `{}` block opening at depth N: mark its opening statement
                     // (the one at the block's RVA) and descend. Blocks with no
                     // matching statement are dropped (no-address rows aren't shown).
                     Ok(pdb::SymbolData::Block(blk)) if depth >= 1 => {
-                        if let (Some(ci), Some(rva)) = (current_entry, blk.offset.to_rva(&address_map)) {
+                        if let (Some(ci), Some(rva)) =
+                            (current_entry, blk.offset.to_rva(&address_map))
+                        {
                             let off = rva.0.wrapping_sub(entries[ci].rva);
                             match entries[ci].statements.iter_mut().find(|s| s.off == off) {
                                 Some(st) => st.depth = depth,
@@ -484,7 +511,9 @@ fn push_local(
     if name.as_bytes() == b"this" {
         return;
     }
-    let ty = fmt.emit_type_impl(module_id, type_index).unwrap_or_default();
+    let ty = fmt
+        .emit_type_impl(module_id, type_index)
+        .unwrap_or_default();
     entries[ci].locals.push(Local {
         name: name.to_string().into_owned(),
         ty,
@@ -567,7 +596,11 @@ fn build_symbol_maps(
         }
     }
 
-    Ok(SymbolMaps { functions, data, public_functions })
+    Ok(SymbolMaps {
+        functions,
+        data,
+        public_functions,
+    })
 }
 
 /// Group entries by file, each file's functions sorted by RVA — borrowed.

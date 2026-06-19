@@ -1,4 +1,4 @@
-use std::collections::{btree_map, BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, btree_map};
 use std::io::{self, BufWriter};
 use std::path::Path;
 
@@ -7,9 +7,9 @@ use pdb_addr2line::type_parser;
 use pdb_addr2line::type_parser::AttributeFlags;
 use pdb_addr2line::type_parser::ReturnType;
 
+use crate::GenFlags;
 use crate::helpers::{Files, FunctionCache, FunctionSignature};
 use crate::pdb_parser::PdbParser;
-use crate::GenFlags;
 use crate::{Namespace, Type};
 
 use crate::{formatter, gen_sources, pdb_parser, type_builder, utils_fs};

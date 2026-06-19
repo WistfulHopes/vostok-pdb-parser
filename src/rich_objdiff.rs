@@ -16,9 +16,11 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use objdiff_core::diff::{diff_objs, DiffObjConfig, ObjDiff, ObjInsDiff, ObjInsDiffKind, ObjSymbolDiff};
-use objdiff_core::obj::read::read;
+use objdiff_core::diff::{
+    DiffObjConfig, ObjDiff, ObjInsDiff, ObjInsDiffKind, ObjSymbolDiff, diff_objs,
+};
 use objdiff_core::obj::ObjInfo;
+use objdiff_core::obj::read::read;
 
 use crate::rich_context::{FunctionEntry, Statement};
 
@@ -60,7 +62,11 @@ fn anyhow_to_err(e: anyhow::Error) -> crate::Error {
 /// Diff the function named `mangled` (a COFF symbol name) between the two object
 /// files. Returns `None` if either object lacks the symbol (caller can fall back
 /// to the text diff).
-pub fn diff(base_obj: &Path, target_obj: &Path, mangled: &str) -> crate::Result<Option<ObjdiffResult>> {
+pub fn diff(
+    base_obj: &Path,
+    target_obj: &Path,
+    mangled: &str,
+) -> crate::Result<Option<ObjdiffResult>> {
     let cfg = DiffObjConfig::default();
     let base = read(base_obj, &cfg).map_err(anyhow_to_err)?;
     let target = read(target_obj, &cfg).map_err(anyhow_to_err)?;
@@ -100,16 +106,26 @@ pub fn diff(base_obj: &Path, target_obj: &Path, mangled: &str) -> crate::Result<
                     make_row(l, r, origin)
                 })
                 .collect();
-            let pct = if max > 0.0 { score / max * 100.0 } else { 100.0 };
+            let pct = if max > 0.0 {
+                score / max * 100.0
+            } else {
+                100.0
+            };
             (rows, pct)
         }
         _ => (
-            bsym.instructions.iter().map(|l| make_row(l, l, origin)).collect(),
+            bsym.instructions
+                .iter()
+                .map(|l| make_row(l, l, origin))
+                .collect(),
             bsym.match_percent.unwrap_or(0.0),
         ),
     };
 
-    Ok(Some(ObjdiffResult { match_percent, rows }))
+    Ok(Some(ObjdiffResult {
+        match_percent,
+        rows,
+    }))
 }
 
 /// Fuzzy per-instruction credit `(score, max)` for one aligned pair, **weighted by
@@ -132,7 +148,11 @@ fn fuzzy_credit(l: &ObjInsDiff, r: &ObjInsDiff) -> (f32, f32) {
         ObjInsDiffKind::ArgMismatch | ObjInsDiffKind::OpMismatch => {
             let total = l.arg_diff.len();
             let matched = l.arg_diff.iter().filter(|d| d.is_none()).count();
-            let op = if matches!(l.kind, ObjInsDiffKind::ArgMismatch) { 1.0 } else { 0.0 };
+            let op = if matches!(l.kind, ObjInsDiffKind::ArgMismatch) {
+                1.0
+            } else {
+                0.0
+            };
             (op + matched as f32) / (1.0 + total as f32)
         }
         // Replace (different op/arg-count) or Delete/Insert (one side only): no
@@ -154,7 +174,12 @@ fn make_row(l: &ObjInsDiff, r: &ObjInsDiff, origin: u64) -> ObjdiffRow {
             (RowKind::Replace, Some(lt()), Some(rt()))
         }
     };
-    ObjdiffRow { kind, base, target, base_off }
+    ObjdiffRow {
+        kind,
+        base,
+        target,
+        base_off,
+    }
 }
 
 /// Render the diff with our source/offset metadata interleaved. Source comes from
@@ -208,10 +233,13 @@ fn render_row(out: &mut String, row: &ObjdiffRow, off: Option<u32>) {
 }
 
 fn find_symbol<'a>(diff: &'a ObjDiff, obj: &ObjInfo, mangled: &str) -> Option<&'a ObjSymbolDiff> {
-    diff.sections.iter().flat_map(|s| s.symbols.iter()).find(|sd| {
-        let sym = &obj.sections[sd.symbol_ref.section_idx].symbols[sd.symbol_ref.symbol_idx];
-        sym.name == mangled
-    })
+    diff.sections
+        .iter()
+        .flat_map(|s| s.symbols.iter())
+        .find(|sd| {
+            let sym = &obj.sections[sd.symbol_ref.section_idx].symbols[sd.symbol_ref.symbol_idx];
+            sym.name == mangled
+        })
 }
 
 fn text(d: &ObjInsDiff) -> &str {

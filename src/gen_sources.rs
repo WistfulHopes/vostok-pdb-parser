@@ -12,10 +12,10 @@ use pdb::{BasePointerRelativeSymbol, BlockSymbol, FallibleIterator, SymbolData};
 use pdb_addr2line::type_parser;
 use pdb_addr2line::type_parser::AttributeFlags;
 
+use crate::GenFlags;
 use crate::helpers::FunctionLocation;
 use crate::helpers::{Files, FunctionCache};
 use crate::pdb_parser::PdbParser;
-use crate::GenFlags;
 use crate::{Namespace, Type};
 
 use crate::formatter;

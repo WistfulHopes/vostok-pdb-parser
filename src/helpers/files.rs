@@ -1,6 +1,6 @@
-use std::collections::hash_map;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map;
 use std::path::Path;
 
 /// Internal cache with information on already created folders/files.

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 
-use vostok_pdb_parser::rich_query::{search, Query};
+use vostok_pdb_parser::rich_query::{Query, search};
 use vostok_pdb_parser::rich_render::render_listing;
 
 #[derive(Parser)]

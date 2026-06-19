@@ -7,9 +7,9 @@ use std::str::FromStr;
 
 use pdb::PDB;
 
+use crate::GenFlags;
 use crate::helpers::Files;
 use crate::pdb_parser::PdbParser;
-use crate::GenFlags;
 use crate::{bail, error};
 use crate::{gen_headers, gen_sources};
 

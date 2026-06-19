@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use pdb::ItemIndex;
 use pdb_addr2line::type_parser;
 
+use crate::Type;
 use crate::gen_sources;
 use crate::pdb_parser;
-use crate::Type;
 
 /// Iterating through modules gives me names of the arguments.
 /// But the class name IS NOT removed from the function name,

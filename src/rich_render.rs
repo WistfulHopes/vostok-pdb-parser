@@ -60,7 +60,11 @@ pub fn render_listing_statement(f: &FunctionEntry, n: usize) -> String {
     // frame braces), so the n-th body statement is `statements[n]`.
     let last_body = f.statements.len().saturating_sub(2);
     if n < 1 || n > last_body {
-        let _ = writeln!(out, "{}: no body statement #{} ({} body statements)", f.name, n, last_body);
+        let _ = writeln!(
+            out,
+            "{}: no body statement #{} ({} body statements)",
+            f.name, n, last_body
+        );
         return out;
     }
     let stmt = &f.statements[n];
@@ -125,7 +129,13 @@ pub fn render_structure(f: &FunctionEntry) -> String {
     // `// LOCALS` (each declared local is its own statement under /Od).
     let n = f.statements.len();
     // Stats on their own comment line so the signature line stays short.
-    let _ = writeln!(out, "; 0x{:x}, {} statements, 0x{:x} bytes", func_va, n - 2, f.size);
+    let _ = writeln!(
+        out,
+        "; 0x{:x}, {} statements, 0x{:x} bytes",
+        func_va,
+        n - 2,
+        f.size
+    );
     let _ = writeln!(out, "{}", f.name);
     // Wrap the body in braces for clarity (echoes the synthetic frame `{`/`}`).
     let _ = writeln!(out, "{{");
@@ -162,14 +172,25 @@ pub fn render_structure(f: &FunctionEntry) -> String {
     // to this width keeps the `0x006`/`+0x00b` look yet grows cleanly when the VA,
     // offset or size get larger - nothing is ever a hardcoded width.
     let hexw = |vals: &mut dyn Iterator<Item = u64>, min: usize| {
-        vals.map(|v| format!("{:x}", v).len()).max().unwrap_or(1).max(min)
+        vals.map(|v| format!("{:x}", v).len())
+            .max()
+            .unwrap_or(1)
+            .max(min)
     };
     let da = hexw(&mut rows.iter().map(|r| r.va as u64), "address".len() - 2);
     let dofs = hexw(&mut rows.iter().map(|r| r.off as u64), "offst".len() - 2);
-    let dd = hexw(&mut rows.iter().map(|r| r.delta.unsigned_abs()), "size".len() - 3);
+    let dd = hexw(
+        &mut rows.iter().map(|r| r.delta.unsigned_abs()),
+        "size".len() - 3,
+    );
     // Column widths follow from the prefixes: `0x`+da, `0x`+dofs, sign+`0x`+dd.
     let (wa, wo, ws) = (2 + da, 2 + dofs, 3 + dd);
-    let wl = rows.iter().map(|r| format!("{}", r.line).len()).max().unwrap_or(0).max("line".len());
+    let wl = rows
+        .iter()
+        .map(|r| format!("{}", r.line).len())
+        .max()
+        .unwrap_or(0)
+        .max("line".len());
 
     // `{}` blocks that open at a no-statement RVA can't be marked on a row; list
     // them on their own (VA + offset aligned to the table below), like the carcass
@@ -178,15 +199,30 @@ pub fn render_structure(f: &FunctionEntry) -> String {
         let _ = writeln!(out, "; skipped blocks ({}):", f.skipped_blocks.len());
         for &(off, depth) in &f.skipped_blocks {
             let va = f.image_base.wrapping_add(f.rva).wrapping_add(off);
-            let _ = writeln!(out, ";   0x{:0da$x}|0x{:0dofs$x}  scope: {}", va, off, depth);
+            let _ = writeln!(
+                out,
+                ";   0x{:0da$x}|0x{:0dofs$x}  scope: {}",
+                va, off, depth
+            );
         }
     }
 
     // The `scope` column (carcass `[N]`: a `{}` block opens at this statement) only
     // appears when some block actually opens, so simple bodies stay 4 columns wide.
-    let scope_cell = |d: i32| if d > 0 { format!("[{}]", d) } else { String::new() };
+    let scope_cell = |d: i32| {
+        if d > 0 {
+            format!("[{}]", d)
+        } else {
+            String::new()
+        }
+    };
     let has_scope = rows.iter().any(|r| r.depth > 0);
-    let wsc = rows.iter().map(|r| scope_cell(r.depth).len()).max().unwrap_or(0).max("scope".len());
+    let wsc = rows
+        .iter()
+        .map(|r| scope_cell(r.depth).len())
+        .max()
+        .unwrap_or(0)
+        .max("scope".len());
 
     // `code` column (the base's source text) appears only when some row carries it.
     let has_code = rows.iter().any(|r| r.src.is_some());

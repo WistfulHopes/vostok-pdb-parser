@@ -24,12 +24,9 @@ fn main() {
         engine_path.push('\\');
     }
 
-    if let Err(error) = vostok_pdb_parser::dump_pdb::dump_pdb(
-        &pdb_path,
-        &output_path,
-        &engine_path,
-        flags,
-    ) {
+    if let Err(error) =
+        vostok_pdb_parser::dump_pdb::dump_pdb(&pdb_path, &output_path, &engine_path, flags)
+    {
         eprintln!("{error}");
         std::process::exit(1);
     }

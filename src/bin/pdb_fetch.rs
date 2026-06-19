@@ -35,7 +35,7 @@ use vostok_pdb_parser::rich_callees;
 use vostok_pdb_parser::rich_context::FunctionEntry;
 use vostok_pdb_parser::rich_diff;
 use vostok_pdb_parser::rich_objdiff;
-use vostok_pdb_parser::rich_query::{search, Query};
+use vostok_pdb_parser::rich_query::{Query, search};
 use vostok_pdb_parser::rich_render::{
     render_info, render_listing, render_listing_statement, render_structure,
 };
@@ -116,10 +116,14 @@ fn resolve_statement(f: &FunctionEntry, cli: &Cli) -> Option<usize> {
         return Some(n);
     }
     let func_va = f.image_base.wrapping_add(f.rva);
-    let off = cli.offset.or_else(|| cli.address.map(|a| a.wrapping_sub(func_va)))?;
+    let off = cli
+        .offset
+        .or_else(|| cli.address.map(|a| a.wrapping_sub(func_va)))?;
     Some(
         (1..f.statements.len().saturating_sub(1))
-            .find(|&i| off >= f.statements[i].off && off < f.statements[i].off + f.statements[i].size)
+            .find(|&i| {
+                off >= f.statements[i].off && off < f.statements[i].off + f.statements[i].size
+            })
             .unwrap_or(0),
     )
 }
@@ -418,7 +422,11 @@ impl Drop for LogGuard {
             args.join(" "),
         );
         use std::io::Write as _;
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             let _ = f.write_all(line.as_bytes());
         }
     }
@@ -436,7 +444,11 @@ fn resolve_log_path(cli: &Cli) -> Option<PathBuf> {
     let binaries = idx.ancestors().nth(3)?;
     let tool = std::env::args()
         .next()
-        .and_then(|a| Path::new(&a).file_name().map(|s| s.to_string_lossy().into_owned()))
+        .and_then(|a| {
+            Path::new(&a)
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "pdb_fetch".into());
     Some(binaries.join(format!("{tool}.log")))
 }

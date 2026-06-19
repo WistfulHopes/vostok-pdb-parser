@@ -209,7 +209,11 @@ impl Project {
             let coarse: Vec<String> = self.coarse.iter().cloned().collect();
             return format!(
                 "[no cmdline] {}",
-                if coarse.is_empty() { "—".into() } else { coarse.join(",") }
+                if coarse.is_empty() {
+                    "—".into()
+                } else {
+                    coarse.join(",")
+                }
             );
         }
         let summaries: BTreeSet<String> = self.flag_sets.keys().map(|n| summary(n)).collect();
@@ -238,7 +242,9 @@ fn build_projects(compilands: &[Compiland]) -> BTreeMap<String, Project> {
             p.sources.push(c.obj_name.clone());
         }
         if let Some(cmd) = &c.cmd {
-            p.flag_sets.entry(normalize_cmd(cmd)).or_insert_with(|| cmd.clone());
+            p.flag_sets
+                .entry(normalize_cmd(cmd))
+                .or_insert_with(|| cmd.clone());
         } else {
             p.no_cmd += 1;
             if let Some(f) = c.flags {
@@ -260,7 +266,10 @@ fn write_report(buf: &mut String, projects: &BTreeMap<String, Project>, full: bo
         let mut sources: Vec<&String> = p.sources.iter().collect();
         sources.sort();
         sources.dedup();
-        let _ = writeln!(buf, "════════════════════════════════════════════════════════════");
+        let _ = writeln!(
+            buf,
+            "════════════════════════════════════════════════════════════"
+        );
         let _ = writeln!(buf, "project : {name}");
         let _ = writeln!(buf, "output  : {}", p.lib);
         let _ = writeln!(buf, "sources : {}", sources.len());
@@ -290,9 +299,21 @@ fn write_comparison(
 ) {
     let names: BTreeSet<&String> = target.keys().chain(base.keys()).collect();
 
-    let both: Vec<&String> = names.iter().filter(|n| target.contains_key(**n) && base.contains_key(**n)).copied().collect();
-    let only_t: Vec<&String> = names.iter().filter(|n| target.contains_key(**n) && !base.contains_key(**n)).copied().collect();
-    let only_b: Vec<&String> = names.iter().filter(|n| !target.contains_key(**n) && base.contains_key(**n)).copied().collect();
+    let both: Vec<&String> = names
+        .iter()
+        .filter(|n| target.contains_key(**n) && base.contains_key(**n))
+        .copied()
+        .collect();
+    let only_t: Vec<&String> = names
+        .iter()
+        .filter(|n| target.contains_key(**n) && !base.contains_key(**n))
+        .copied()
+        .collect();
+    let only_b: Vec<&String> = names
+        .iter()
+        .filter(|n| !target.contains_key(**n) && base.contains_key(**n))
+        .copied()
+        .collect();
 
     let _ = writeln!(buf, "# report-2 — project/config comparison\n");
     let _ = writeln!(buf, "TARGET = {}", target_path.display());
@@ -300,11 +321,18 @@ fn write_comparison(
     let _ = writeln!(
         buf,
         "\nprojects: target={}  base={}  in-both={}  target-only={}  base-only={}\n",
-        target.len(), base.len(), both.len(), only_t.len(), only_b.len()
+        target.len(),
+        base.len(),
+        both.len(),
+        only_t.len(),
+        only_b.len()
     );
 
     // ── projects present in BOTH, with their configurations ──────────────────
-    let _ = writeln!(buf, "════════════════════════ IN BOTH ════════════════════════\n");
+    let _ = writeln!(
+        buf,
+        "════════════════════════ IN BOTH ════════════════════════\n"
+    );
     for n in &both {
         let t = &target[*n];
         let b = &base[*n];
@@ -321,7 +349,12 @@ fn write_comparison(
         } else {
             "DIFF-FLAGS"
         };
-        let _ = writeln!(buf, "── {n}   [{status}]   (target {} src / base {} src)", t.source_count(), b.source_count());
+        let _ = writeln!(
+            buf,
+            "── {n}   [{status}]   (target {} src / base {} src)",
+            t.source_count(),
+            b.source_count()
+        );
         let _ = writeln!(buf, "     target: {}", t.config());
         let _ = writeln!(buf, "     base  : {}", b.config());
         if full {
@@ -335,16 +368,38 @@ fn write_comparison(
         let _ = writeln!(buf);
     }
 
-    let _ = writeln!(buf, "════════════════════ TARGET ONLY ════════════════════════");
-    let _ = writeln!(buf, "(in the original game PDB, missing from the base build)\n");
+    let _ = writeln!(
+        buf,
+        "════════════════════ TARGET ONLY ════════════════════════"
+    );
+    let _ = writeln!(
+        buf,
+        "(in the original game PDB, missing from the base build)\n"
+    );
     for n in &only_t {
-        let _ = writeln!(buf, "── {n}   ({} src)   {}", target[*n].source_count(), target[*n].config());
+        let _ = writeln!(
+            buf,
+            "── {n}   ({} src)   {}",
+            target[*n].source_count(),
+            target[*n].config()
+        );
     }
 
-    let _ = writeln!(buf, "\n═════════════════════ BASE ONLY ═════════════════════════");
-    let _ = writeln!(buf, "(in the base build, not present in the original game PDB)\n");
+    let _ = writeln!(
+        buf,
+        "\n═════════════════════ BASE ONLY ═════════════════════════"
+    );
+    let _ = writeln!(
+        buf,
+        "(in the base build, not present in the original game PDB)\n"
+    );
     for n in &only_b {
-        let _ = writeln!(buf, "── {n}   ({} src)   {}", base[*n].source_count(), base[*n].config());
+        let _ = writeln!(
+            buf,
+            "── {n}   ({} src)   {}",
+            base[*n].source_count(),
+            base[*n].config()
+        );
     }
 }
 
@@ -356,7 +411,8 @@ fn dump(compilands: &[Compiland], explore: Option<usize>, grep: Option<&str>) {
         let hit = match grep {
             Some(g) => {
                 let g = g.to_lowercase();
-                c.module_name.to_lowercase().contains(&g) || c.object_file_name.to_lowercase().contains(&g)
+                c.module_name.to_lowercase().contains(&g)
+                    || c.object_file_name.to_lowercase().contains(&g)
             }
             None => shown < explore.unwrap_or(0),
         };
@@ -420,10 +476,14 @@ fn normalize_cmd(cmd: &str) -> String {
     let mut toks = tokenize(cmd);
     toks.retain(|t| {
         let l = t.to_lowercase();
-        !(l.starts_with("-fo") || l.starts_with("/fo")
-            || l.starts_with("-fd") || l.starts_with("/fd")
-            || l.starts_with("-fp") || l.starts_with("/fp")
-            || l.starts_with("-fr") || l.starts_with("/fr"))
+        !(l.starts_with("-fo")
+            || l.starts_with("/fo")
+            || l.starts_with("-fd")
+            || l.starts_with("/fd")
+            || l.starts_with("-fp")
+            || l.starts_with("/fp")
+            || l.starts_with("-fr")
+            || l.starts_with("/fr"))
     });
     toks.sort();
     toks.join(" ")
@@ -473,13 +533,20 @@ fn summary(norm: &str) -> String {
         .split(' ')
         .filter(|t| {
             let l = t.to_lowercase();
-            l.starts_with("-o") || l.starts_with("/o")
-                || l.starts_with("-m") || l.starts_with("/m")
-                || l.starts_with("-g") || l.starts_with("/g")
-                || l.starts_with("-z") || l.starts_with("/z")
-                || l.starts_with("-arch") || l.starts_with("-fp")
-                || l.starts_with("-tc") || l.starts_with("-tp")
-                || l.starts_with("-eh") || l.starts_with("/eh")
+            l.starts_with("-o")
+                || l.starts_with("/o")
+                || l.starts_with("-m")
+                || l.starts_with("/m")
+                || l.starts_with("-g")
+                || l.starts_with("/g")
+                || l.starts_with("-z")
+                || l.starts_with("/z")
+                || l.starts_with("-arch")
+                || l.starts_with("-fp")
+                || l.starts_with("-tc")
+                || l.starts_with("-tp")
+                || l.starts_with("-eh")
+                || l.starts_with("/eh")
                 || l.starts_with("-rtc")
         })
         .collect();
